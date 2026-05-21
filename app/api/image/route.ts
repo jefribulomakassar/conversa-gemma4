@@ -6,12 +6,17 @@ export async function POST(req: NextRequest) {
     const file = form.get("file") as File | null;
 
     if (!file) {
-      return NextResponse.json({ error: "No audio file provided." }, { status: 400 });
+      return NextResponse.json({ error: "No image file provided." }, { status: 400 });
     }
 
-    const maxSize = 20 * 1024 * 1024; // 20MB
+    const maxSize = 10 * 1024 * 1024; // 10MB
     if (file.size > maxSize) {
-      return NextResponse.json({ error: "File terlalu besar. Maksimal 20MB." }, { status: 400 });
+      return NextResponse.json({ error: "File terlalu besar. Maksimal 10MB." }, { status: 400 });
+    }
+
+    const allowed = ["image/jpeg", "image/png", "image/webp"];
+    if (!allowed.includes(file.type)) {
+      return NextResponse.json({ error: "Format tidak didukung. Gunakan JPG, PNG, atau WEBP." }, { status: 400 });
     }
 
     const apiKey = process.env.GEMINI_API_KEY;
@@ -22,7 +27,7 @@ export async function POST(req: NextRequest) {
     // Convert file to base64
     const arrayBuffer = await file.arrayBuffer();
     const base64 = Buffer.from(arrayBuffer).toString("base64");
-    const mimeType = file.type || "audio/mpeg";
+    const mimeType = file.type;
 
     const payload = {
       model: "gemma-4-26b-a4b-it",
@@ -37,21 +42,21 @@ export async function POST(req: NextRequest) {
               },
             },
             {
-              text: `You are an enterprise meeting intelligence assistant. Analyze this audio recording carefully.
+              text: `You are an enterprise whiteboard and document image analyst. Carefully examine this image.
 
 Return your response as a valid JSON object with exactly this structure:
 {
-  "transcript": "Full verbatim transcript of the audio",
-  "keyPoints": ["Key point 1", "Key point 2", "Key point 3"],
-  "actionItems": ["Action item with owner 1", "Action item with owner 2"],
-  "followUpQuestions": ["Follow-up question 1", "Follow-up question 2"]
+  "extractedText": "All text visible in the image, transcribed verbatim and in order",
+  "diagramDescription": "Description of any diagrams, charts, arrows, boxes, drawings, or visual structures present. Write 'No diagrams detected.' if none.",
+  "structuredSummary": "A clear, professional summary of what this whiteboard or image contains and what topic or meeting it relates to",
+  "nextSteps": ["Suggested next step 1", "Suggested next step 2", "Suggested next step 3"]
 }
 
 Rules:
-- transcript: complete word-for-word transcription
-- keyPoints: 3-6 most important discussion points
-- actionItems: concrete tasks with responsible person if mentioned
-- followUpQuestions: 2-4 questions that should be addressed after this meeting
+- extractedText: transcribe every word visible, preserve structure (bullets, numbered lists, columns)
+- diagramDescription: describe shapes, flows, connections, and their meaning
+- structuredSummary: 2-4 sentences synthesizing the full content
+- nextSteps: 3-5 actionable recommendations based on the content
 - Return ONLY valid JSON, no markdown, no preamble`,
             },
           ],
@@ -59,7 +64,7 @@ Rules:
       ],
       generationConfig: {
         temperature: 0.2,
-        maxOutputTokens: 4096,
+        maxOutputTokens: 3000,
         responseMimeType: "application/json",
       },
     };
@@ -89,13 +94,12 @@ Rules:
       return NextResponse.json({ error: "Tidak ada response dari model." }, { status: 500 });
     }
 
-    // Strip markdown fences if any
     const clean = raw.replace(/```json|```/g, "").trim();
     const parsed = JSON.parse(clean);
 
     return NextResponse.json(parsed);
   } catch (err) {
-    console.error("Audio route error:", err);
+    console.error("Image route error:", err);
     return NextResponse.json({ error: "Internal server error." }, { status: 500 });
   }
 }
