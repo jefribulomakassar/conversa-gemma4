@@ -107,7 +107,7 @@ Rules:
     }
 
     const payload = {
-      model: "gemma-4-26b-a4b-it",
+      model: "gemini-2.5-flash",
       contents: [
         {
           role: "user",
@@ -126,7 +126,7 @@ Rules:
     };
 
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemma-4-26b-a4b-it:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
