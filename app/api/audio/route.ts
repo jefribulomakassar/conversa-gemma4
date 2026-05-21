@@ -25,7 +25,7 @@ export async function POST(req: NextRequest) {
     const mimeType = file.type || "audio/mpeg";
 
     const payload = {
-      model: "gemini-2.0-flash",
+      model: "gemini-2.5-flash",
       contents: [
         {
           role: "user",
@@ -65,7 +65,7 @@ Rules:
     };
 
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
