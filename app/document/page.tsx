@@ -1,0 +1,285 @@
+"use client";
+
+import { useState, useRef } from "react";
+
+type Result = {
+  extractedText: string;
+  diagramDescription: string;
+  structuredSummary: string;
+  nextSteps: string[];
+};
+
+export default function ImagePage() {
+  const [file, setFile] = useState<File | null>(null);
+  const [preview, setPreview] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<Result | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const handleFile = (f: File) => {
+    const allowed = ["image/jpeg", "image/png", "image/webp"];
+    if (!allowed.includes(f.type)) {
+      setError("Format tidak didukung. Gunakan JPG, PNG, atau WEBP.");
+      return;
+    }
+    setError(null);
+    setResult(null);
+    setFile(f);
+    const reader = new FileReader();
+    reader.onload = (e) => setPreview(e.target?.result as string);
+    reader.readAsDataURL(f);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragging(false);
+    if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+  };
+
+  const handleSubmit = async () => {
+    if (!file) return;
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const res = await fetch("/api/image", { method: "POST", body: form });
+      if (!res.ok) throw new Error((await res.json()).error || "Gagal memproses gambar.");
+      const data = await res.json();
+      setResult(data);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Terjadi kesalahan.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const reset = () => { setFile(null); setPreview(null); setResult(null); setError(null); };
+
+  return (
+    <>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap');
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background: #07080A; color: #E8EAF0; font-family: 'DM Sans', sans-serif; min-height: 100vh; }
+
+        .noise { position: fixed; inset: 0; z-index: 0; pointer-events: none;
+          background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+          opacity: 0.5; }
+        .orb { position: fixed; border-radius: 50%; filter: blur(130px); pointer-events: none; z-index: 0;
+          width: 460px; height: 460px; background: #4F8EF722; top: -100px; left: -80px; }
+
+        .wrapper { position: relative; z-index: 1; max-width: 760px; margin: 0 auto; padding: 52px 24px 80px; }
+
+        .back { display: inline-flex; align-items: center; gap: 8px; color: #4B5470;
+          font-size: 13px; font-weight: 500; text-decoration: none; margin-bottom: 36px;
+          transition: color 0.2s; letter-spacing: 0.02em; }
+        .back:hover { color: #4F8EF7; }
+
+        .header { margin-bottom: 40px; }
+        .tag { display: inline-flex; align-items: center; gap: 6px; font-size: 11px;
+          font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
+          color: #4F8EF7; margin-bottom: 14px; }
+        .tag-dot { width: 6px; height: 6px; border-radius: 50%; background: #4F8EF7;
+          box-shadow: 0 0 8px #4F8EF7; animation: pulse 2s ease-in-out infinite; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+        h1 { font-family: 'Syne', sans-serif; font-size: clamp(28px, 5vw, 42px);
+          font-weight: 800; letter-spacing: -0.03em; color: #F0F2F8; line-height: 1.1; }
+        .subtitle { margin-top: 10px; font-size: 15px; font-weight: 300; color: #6B7285; line-height: 1.65; }
+
+        .dropzone { border: 1.5px dashed #1E2230; border-radius: 18px; padding: 48px 32px;
+          text-align: center; cursor: pointer; transition: border-color 0.2s, background 0.2s;
+          background: #0D0F14; position: relative; }
+        .dropzone.drag { border-color: #4F8EF7; background: #4F8EF708; }
+        .dropzone.has-file { border-style: solid; border-color: #4F8EF755; padding: 20px; }
+
+        .dz-icon { font-size: 40px; margin-bottom: 14px; display: block;
+          filter: drop-shadow(0 0 14px #4F8EF766); }
+        .dz-label { font-family: 'Syne', sans-serif; font-size: 16px; font-weight: 600;
+          color: #C8CCE0; margin-bottom: 6px; }
+        .dz-sub { font-size: 13px; color: #4B5470; }
+        .dz-sub span { color: #4F8EF7; font-weight: 500; }
+
+        .preview-wrap { position: relative; }
+        .preview-img { width: 100%; max-height: 320px; object-fit: contain;
+          border-radius: 12px; display: block; }
+        .preview-badge { position: absolute; top: 10px; right: 10px;
+          background: #07080Acc; border: 1px solid #4F8EF733;
+          border-radius: 100px; padding: 5px 12px;
+          font-size: 12px; color: #4F8EF7; font-weight: 500;
+          backdrop-filter: blur(8px); }
+        .preview-change { margin-top: 12px; font-size: 12px; color: #4B5470;
+          text-align: center; }
+        .preview-change span { color: #4F8EF7; cursor: pointer; font-weight: 500; }
+        .preview-change span:hover { text-decoration: underline; }
+
+        .btn-primary { width: 100%; margin-top: 20px; padding: 16px;
+          background: #4F8EF7; color: #07080A; border: none; border-radius: 12px;
+          font-family: 'Syne', sans-serif; font-size: 15px; font-weight: 700;
+          letter-spacing: 0.02em; cursor: pointer; transition: opacity 0.2s, transform 0.2s; }
+        .btn-primary:hover:not(:disabled) { opacity: 0.88; transform: translateY(-1px); }
+        .btn-primary:disabled { opacity: 0.35; cursor: not-allowed; }
+
+        .loading { text-align: center; padding: 48px 0; }
+        .scan { width: 56px; height: 56px; border-radius: 12px; background: #0D0F14;
+          border: 1px solid #4F8EF733; margin: 0 auto 20px;
+          position: relative; overflow: hidden; }
+        .scan-line { position: absolute; left: 0; right: 0; height: 2px;
+          background: linear-gradient(90deg, transparent, #4F8EF7, transparent);
+          animation: scan 1.6s ease-in-out infinite; }
+        @keyframes scan { 0%{top:0%} 100%{top:100%} }
+        .scan-icon { position: absolute; inset: 0; display: flex; align-items: center;
+          justify-content: center; font-size: 22px; }
+        .loading-text { font-size: 14px; color: #4B5470; }
+
+        .error { background: #1A0E0E; border: 1px solid #FF6B6B33; border-radius: 12px;
+          padding: 14px 18px; font-size: 13px; color: #FF8080; margin-top: 16px; }
+
+        .results { margin-top: 40px; display: flex; flex-direction: column; gap: 20px; }
+
+        .section { background: #0D0F14; border: 1px solid #1E2230; border-radius: 16px; overflow: hidden; }
+        .section-header { padding: 16px 24px; border-bottom: 1px solid #1A1D28;
+          display: flex; align-items: center; gap: 10px; }
+        .section-icon { font-size: 18px; }
+        .section-title { font-family: 'Syne', sans-serif; font-size: 14px; font-weight: 700;
+          letter-spacing: 0.04em; text-transform: uppercase; color: #8891A8; }
+        .section-body { padding: 20px 24px; }
+
+        .text-block { font-size: 14px; line-height: 1.8; color: #8891A8;
+          font-weight: 300; white-space: pre-wrap; }
+        .summary-block { font-size: 14px; line-height: 1.8; color: #A8B0CC;
+          font-weight: 300; }
+
+        .list { list-style: none; display: flex; flex-direction: column; gap: 10px; }
+        .list li { display: flex; gap: 12px; font-size: 14px; line-height: 1.6; color: #A8B0CC; }
+        .list li::before { content: ''; width: 6px; height: 6px; border-radius: 50%;
+          background: #4F8EF7; flex-shrink: 0; margin-top: 7px; }
+
+        .btn-reset { margin-top: 28px; width: 100%; padding: 13px;
+          background: transparent; border: 1px solid #1E2230; border-radius: 12px;
+          font-family: 'DM Sans', sans-serif; font-size: 14px; color: #4B5470;
+          cursor: pointer; transition: border-color 0.2s, color 0.2s; }
+        .btn-reset:hover { border-color: #4F8EF7; color: #4F8EF7; }
+
+        @media (max-width: 600px) { .wrapper { padding: 32px 16px 60px; } }
+      `}</style>
+
+      <div className="noise" />
+      <div className="orb" />
+
+      <div className="wrapper">
+        <a href="/" className="back">← Back to Agents</a>
+
+        <div className="header">
+          <div className="tag"><span className="tag-dot" />Image Intelligence</div>
+          <h1>Whiteboard Analyzer</h1>
+          <p className="subtitle">
+            Upload a whiteboard photo or handwritten notes. Gemma 4 reads and interprets the visual, then generates a structured summary and next steps.
+          </p>
+        </div>
+
+        {!result && (
+          <>
+            <div
+              className={`dropzone${dragging ? " drag" : ""}${file ? " has-file" : ""}`}
+              onClick={() => !file && inputRef.current?.click()}
+              onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+              onDragLeave={() => setDragging(false)}
+              onDrop={handleDrop}
+            >
+              {!file ? (
+                <>
+                  <span className="dz-icon">🖼️</span>
+                  <div className="dz-label">Drop your image here</div>
+                  <div className="dz-sub">or <span>browse</span> · JPG, PNG, WEBP</div>
+                </>
+              ) : (
+                <div className="preview-wrap">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={preview!} alt="Preview" className="preview-img" />
+                  <div className="preview-badge">✓ Ready</div>
+                </div>
+              )}
+              <input ref={inputRef} type="file" accept=".jpg,.jpeg,.png,.webp,image/*"
+                style={{ display: "none" }} onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])} />
+            </div>
+
+            {file && (
+              <p className="preview-change">
+                Wrong file? <span onClick={reset}>Remove and re-upload</span>
+              </p>
+            )}
+
+            {error && <div className="error">⚠️ {error}</div>}
+
+            <button className="btn-primary" disabled={!file || loading} onClick={handleSubmit}>
+              {loading ? "Processing…" : "Analyze Image →"}
+            </button>
+          </>
+        )}
+
+        {loading && (
+          <div className="loading">
+            <div className="scan">
+              <div className="scan-line" />
+              <div className="scan-icon">🖼️</div>
+            </div>
+            <div className="loading-text">Gemma 4 is reading your image…</div>
+          </div>
+        )}
+
+        {result && (
+          <div className="results">
+            <div className="section">
+              <div className="section-header">
+                <span className="section-icon">🔤</span>
+                <span className="section-title">Extracted Text</span>
+              </div>
+              <div className="section-body">
+                <p className="text-block">{result.extractedText}</p>
+              </div>
+            </div>
+
+            <div className="section">
+              <div className="section-header">
+                <span className="section-icon">📐</span>
+                <span className="section-title">Diagrams & Visual Elements</span>
+              </div>
+              <div className="section-body">
+                <p className="text-block">{result.diagramDescription}</p>
+              </div>
+            </div>
+
+            <div className="section">
+              <div className="section-header">
+                <span className="section-icon">📋</span>
+                <span className="section-title">Structured Summary</span>
+              </div>
+              <div className="section-body">
+                <p className="summary-block">{result.structuredSummary}</p>
+              </div>
+            </div>
+
+            <div className="section">
+              <div className="section-header">
+                <span className="section-icon">🚀</span>
+                <span className="section-title">Suggested Next Steps</span>
+              </div>
+              <div className="section-body">
+                <ul className="list">
+                  {result.nextSteps.map((s, i) => <li key={i}>{s}</li>)}
+                </ul>
+              </div>
+            </div>
+
+            <button className="btn-reset" onClick={reset}>← Analyze another image</button>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
