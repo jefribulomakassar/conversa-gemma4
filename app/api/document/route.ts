@@ -166,7 +166,12 @@ Rules:
     }
 
     const clean = mainText.replace(/```json|```/g, "").trim();
-    const parsed = JSON.parse(clean);
+    const jsonMatch = clean.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      console.error("No JSON found in response:", clean.slice(0, 200));
+      return NextResponse.json({ error: "Model tidak menghasilkan JSON yang valid." }, { status: 500 });
+    }
+    const parsed = JSON.parse(jsonMatch[0]);
 
     // Attach thinking trace if available
     if (thinkingText) {
