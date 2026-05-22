@@ -94,8 +94,13 @@ Rules:
     }
 
     const clean = raw.replace(/```json|```/g, "").trim();
-    const parsed = JSON.parse(clean);
-
+    // Find JSON object within response
+    const jsonMatch = clean.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      console.error("No JSON found in response:", clean.slice(0, 200));
+      return NextResponse.json({ error: "Model tidak menghasilkan JSON yang valid." }, { status: 500 });
+    }
+    const parsed = JSON.parse(jsonMatch[0]);
     return NextResponse.json(parsed);
   } catch (err) {
     console.error("Image route error:", err);
