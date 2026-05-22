@@ -96,7 +96,6 @@ Rules:
     const generationConfig: Record<string, unknown> = {
       temperature: thinking ? 0.1 : 0.3,
       maxOutputTokens: 6000,
-      responseMimeType: "application/json",
     };
 
     if (thinking) {
