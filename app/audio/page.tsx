@@ -23,7 +23,7 @@ export default function AudioPage() {
   const handleFile = (f: File) => {
     const allowed = ["audio/mpeg", "audio/wav", "audio/x-wav", "audio/mp4", "audio/m4a", "audio/x-m4a"];
     if (!allowed.includes(f.type) && !f.name.match(/\.(mp3|wav|m4a)$/i)) {
-      setError("Format tidak didukung. Gunakan MP3, WAV, atau M4A.");
+      setError("Format not supported. Use MP3, WAV, or M4A.");
       return;
     }
     setError(null);
@@ -52,7 +52,7 @@ export default function AudioPage() {
 
       if (!res.ok || !res.body) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData?.error || "Gagal memproses audio.");
+        throw new Error(errData?.error || "Failed to process audio.");
       }
 
       // Baca stream SSE
@@ -133,9 +133,9 @@ export default function AudioPage() {
   };
 
   const stepLabel: Record<string, string> = {
-    transcribing: "Mentranskripsi audio via Groq Whisper…",
-    analyzing: "Gemma 4 sedang menganalisis transkrip…",
-    done: "Selesai.",
+    transcribing: "Transcribing audio via Groq Whisper…",
+    analyzing: "Gemma 4 is analyzing the transcript…",
+    done: "Finished.",
   };
 
   const hasAnyResult = result && (
@@ -326,7 +326,7 @@ export default function AudioPage() {
         {loading && step !== "idle" && (
           <div className="status-bar">
             <div className="status-spinner" />
-            {stepLabel[step] ?? "Memproses…"}
+            {stepLabel[step] ?? "Processing…"}
           </div>
         )}
 
@@ -336,7 +336,7 @@ export default function AudioPage() {
             <div className="wave">
               {[...Array(5)].map((_, i) => <span key={i} />)}
             </div>
-            <div className="loading-text">Menunggu transkripsi…</div>
+            <div className="loading-text">Waiting for transcription…</div>
           </div>
         )}
 
