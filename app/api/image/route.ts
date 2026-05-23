@@ -1,70 +1,88 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 
 const MODEL = "google/gemma-4-26b-a4b-it";
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
-export async function POST(req: NextRequest) {
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function encodeEvent(
+  controller: ReadableStreamDefaultController<Uint8Array>,
+  encoder: TextEncoder,
+  event: string,
+  data: unknown
+) {
+  controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+}
+
+function extractJSON(raw: string): Record<string, unknown> | null {
+  const clean = raw.replace(/```json\s*/gi, "").replace(/```\s*/gi, "").trim();
+  const start = clean.indexOf("{");
+  const end = clean.lastIndexOf("}");
+  if (start === -1 || end === -1 || end <= start) return null;
+  const candidate = clean.slice(start, end + 1);
   try {
-    // ── 1. Parse form data ──────────────────────────────────────────────────
-    const form = await req.formData();
-    const file = form.get("file") as File | null;
-
-    if (!file) {
-      return NextResponse.json({ error: "No image file provided." }, { status: 400 });
+    return JSON.parse(candidate);
+  } catch {
+    let pos = candidate.lastIndexOf("}");
+    while (pos > 0) {
+      try { return JSON.parse(candidate.slice(0, pos + 1)); } catch { pos = candidate.lastIndexOf("}", pos - 1); }
     }
+    return null;
+  }
+}
 
-    const maxSize = 10 * 1024 * 1024; // 10MB
-    if (file.size > maxSize) {
-      return NextResponse.json(
-        { error: "File terlalu besar. Maksimal 10MB." },
-        { status: 400 }
-      );
-    }
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-    const allowed = ["image/jpeg", "image/png", "image/webp"];
-    if (!allowed.includes(file.type)) {
-      return NextResponse.json(
-        { error: "Format tidak didukung. Gunakan JPG, PNG, atau WEBP." },
-        { status: 400 }
-      );
-    }
+// ── Main handler ─────────────────────────────────────────────────────────────
 
-    // ── 2. Check API key ────────────────────────────────────────────────────
-    const apiKey = process.env.OPENROUTER_API_KEY;
-    if (!apiKey) {
-      return NextResponse.json(
-        { error: "OPENROUTER_API_KEY tidak ditemukan." },
-        { status: 500 }
-      );
-    }
+export async function POST(req: NextRequest) {
+  const encoder = new TextEncoder();
 
-    // ── 3. Convert to base64 data URL ───────────────────────────────────────
-    const arrayBuffer = await file.arrayBuffer();
-    const base64 = Buffer.from(arrayBuffer).toString("base64");
-    const dataUrl = `data:${file.type};base64,${base64}`;
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const emit = (event: string, data: unknown) =>
+        encodeEvent(controller, encoder, event, data);
 
-    // ── 4. Build OpenRouter request (OpenAI-compatible format) ──────────────
-    const payload = {
-      model: MODEL,
-      temperature: 0.2,
-      max_tokens: 3000,
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are an enterprise whiteboard and document image analyst. " +
-            "Always respond with ONLY a valid JSON object — no markdown, no backticks, no explanation.",
-        },
-        {
-          role: "user",
-          content: [
+      try {
+        // 1. Parse form
+        const form = await req.formData();
+        const file = form.get("file") as File | null;
+
+        if (!file) { emit("error", { message: "No image file provided." }); controller.close(); return; }
+        if (file.size > 10 * 1024 * 1024) { emit("error", { message: "File terlalu besar. Maksimal 10MB." }); controller.close(); return; }
+        if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+          emit("error", { message: "Format tidak didukung. Gunakan JPG, PNG, atau WEBP." });
+          controller.close(); return;
+        }
+
+        const apiKey = process.env.OPENROUTER_API_KEY;
+        if (!apiKey) { emit("error", { message: "OPENROUTER_API_KEY tidak ditemukan." }); controller.close(); return; }
+
+        // 2. Convert to base64
+        emit("status", { step: "reading" });
+        const arrayBuffer = await file.arrayBuffer();
+        const base64 = Buffer.from(arrayBuffer).toString("base64");
+        const dataUrl = `data:${file.type};base64,${base64}`;
+
+        // 3. Call OpenRouter
+        emit("status", { step: "analyzing" });
+
+        const payload = {
+          model: MODEL,
+          temperature: 0.2,
+          max_tokens: 3000,
+          messages: [
             {
-              type: "image_url",
-              image_url: { url: dataUrl },
+              role: "system",
+              content: "You are an enterprise whiteboard and document image analyst. Always respond with ONLY a valid JSON object — no markdown, no backticks, no explanation.",
             },
             {
-              type: "text",
-              text: `Carefully examine this image and return a valid JSON object with EXACTLY this structure:
+              role: "user",
+              content: [
+                { type: "image_url", image_url: { url: dataUrl } },
+                {
+                  type: "text",
+                  text: `Carefully examine this image and return a valid JSON object with EXACTLY this structure:
 {
   "extractedText": "All text visible in the image, transcribed verbatim and in order",
   "diagramDescription": "Description of any diagrams, charts, arrows, boxes, drawings, or visual structures. Write 'No diagrams detected.' if none.",
@@ -78,109 +96,80 @@ Rules:
 - structuredSummary: synthesize full content into 2-4 sentences
 - nextSteps: 3-5 actionable recommendations based on the content
 - Return ONLY the JSON object — no preamble, no markdown fences`,
+                },
+              ],
             },
           ],
-        },
-      ],
-    };
+        };
 
-    // ── 5. Call OpenRouter ──────────────────────────────────────────────────
-    const response = await fetch(OPENROUTER_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-        "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "https://localhost:3000",
-        "X-Title": process.env.NEXT_PUBLIC_SITE_NAME || "Whiteboard Analyzer",
-      },
-      body: JSON.stringify(payload),
-    });
+        const response = await fetch(OPENROUTER_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+            "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "https://localhost:3000",
+            "X-Title": process.env.NEXT_PUBLIC_SITE_NAME || "Whiteboard Analyzer",
+          },
+          body: JSON.stringify(payload),
+        });
 
-    if (!response.ok) {
-      const errData = await response.json().catch(() => ({}));
-      const msg = errData?.error?.message || `OpenRouter error ${response.status}`;
-      console.error("OpenRouter API error:", errData);
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          const statusMessages: Record<number, string> = {
+            401: "API key tidak valid. Periksa OPENROUTER_API_KEY Anda.",
+            402: "Kredit OpenRouter habis. Silakan top up akun Anda.",
+            429: "Rate limit tercapai. Coba lagi sebentar.",
+          };
+          emit("error", { message: statusMessages[response.status] || errData?.error?.message || `OpenRouter error ${response.status}` });
+          controller.close(); return;
+        }
 
-      // Surface actionable messages
-      if (response.status === 401) {
-        return NextResponse.json(
-          { error: "API key tidak valid. Periksa OPENROUTER_API_KEY Anda." },
-          { status: 401 }
-        );
+        // 4. Parse response
+        emit("status", { step: "parsing" });
+
+        const data = await response.json();
+        const raw: string | undefined = data?.choices?.[0]?.message?.content;
+
+        if (!raw) { emit("error", { message: "Tidak ada respons dari model." }); controller.close(); return; }
+
+        const parsed = extractJSON(raw);
+        if (!parsed) { emit("error", { message: "Model tidak menghasilkan JSON yang valid. Coba lagi." }); controller.close(); return; }
+
+        // Normalize
+        const requiredFields = ["extractedText", "diagramDescription", "structuredSummary", "nextSteps"];
+        for (const field of requiredFields) {
+          if (!(field in parsed)) parsed[field] = field === "nextSteps" ? [] : "Tidak tersedia.";
+        }
+        if (!Array.isArray(parsed.nextSteps)) parsed.nextSteps = [String(parsed.nextSteps)];
+
+        // 5. Stream field by field
+        emit("extractedText", { text: parsed.extractedText as string });
+        await sleep(100);
+
+        emit("diagramDescription", { text: parsed.diagramDescription as string });
+        await sleep(100);
+
+        emit("structuredSummary", { text: parsed.structuredSummary as string });
+        await sleep(100);
+
+        emit("nextSteps", { items: parsed.nextSteps as string[] });
+        await sleep(100);
+
+        emit("done", {});
+        controller.close();
+      } catch (err) {
+        console.error("Image route error:", err);
+        encodeEvent(controller, encoder, "error", { message: err instanceof Error ? err.message : "Internal server error." });
+        controller.close();
       }
-      if (response.status === 402) {
-        return NextResponse.json(
-          { error: "Kredit OpenRouter habis. Silakan top up akun Anda." },
-          { status: 402 }
-        );
-      }
-      if (response.status === 429) {
-        return NextResponse.json(
-          { error: "Rate limit tercapai. Coba lagi sebentar." },
-          { status: 429 }
-        );
-      }
+    },
+  });
 
-      return NextResponse.json({ error: msg }, { status: response.status });
-    }
-
-    // ── 6. Parse model response ─────────────────────────────────────────────
-    const data = await response.json();
-    const raw: string | undefined = data?.choices?.[0]?.message?.content;
-
-    if (!raw) {
-      console.error("Empty model response:", data);
-      return NextResponse.json(
-        { error: "Tidak ada respons dari model." },
-        { status: 500 }
-      );
-    }
-
-    // Strip markdown fences if model disobeys system prompt
-    const clean = raw
-      .replace(/^```json\s*/i, "")
-      .replace(/^```\s*/i, "")
-      .replace(/```\s*$/i, "")
-      .trim();
-
-    // Extract JSON object even if there's surrounding text
-    const jsonMatch = clean.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      console.error("No JSON in model response:", clean.slice(0, 300));
-      return NextResponse.json(
-        { error: "Model tidak menghasilkan JSON yang valid. Coba lagi." },
-        { status: 500 }
-      );
-    }
-
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = JSON.parse(jsonMatch[0]);
-    } catch (parseErr) {
-      console.error("JSON parse failed:", parseErr, jsonMatch[0].slice(0, 300));
-      return NextResponse.json(
-        { error: "Gagal mem-parse JSON dari model. Coba lagi." },
-        { status: 500 }
-      );
-    }
-
-    // ── 7. Validate expected fields ─────────────────────────────────────────
-    const requiredFields = ["extractedText", "diagramDescription", "structuredSummary", "nextSteps"];
-    for (const field of requiredFields) {
-      if (!(field in parsed)) {
-        parsed[field] = field === "nextSteps" ? [] : "Tidak tersedia.";
-      }
-    }
-
-    // Ensure nextSteps is always an array
-    if (!Array.isArray(parsed.nextSteps)) {
-      parsed.nextSteps = [String(parsed.nextSteps)];
-    }
-
-    return NextResponse.json(parsed);
-
-  } catch (err) {
-    console.error("Image route error:", err);
-    return NextResponse.json({ error: "Internal server error." }, { status: 500 });
-  }
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  });
 }
