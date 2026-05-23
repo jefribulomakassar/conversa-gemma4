@@ -3,8 +3,8 @@ import { NextRequest, NextResponse } from "next/server";
 // Gemma 4 via Google AI Studio (free, stabil)
 const GOOGLE_AI_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 const GEMMA_MODELS = [
-  "gemma-4-27b-it",   // Gemma 4 31B (nama model di AI Studio)
-  "gemma-4-12b-it",   // fallback lebih kecil, faster
+  "gemma-4-26b-a4b-it",  // MoE, efisien
+  "gemma-4-31b-it",      // fallback dense
 ];
 
 // Groq Whisper — transkripsi gratis
