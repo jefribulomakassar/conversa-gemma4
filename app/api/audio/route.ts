@@ -1,12 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 
-// Gemma 4 free models — fallback otomatis jika rate limit
+// Gemma 4 via Google AI Studio (free, stabil)
+const GOOGLE_AI_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 const GEMMA_MODELS = [
-  "google/gemma-4-26b-a4b-it:free",
-  "google/gemma-4-31b-it:free",
+  "gemma-4-27b-it",   // Gemma 4 31B (nama model di AI Studio)
+  "gemma-4-12b-it",   // fallback lebih kecil, faster
 ];
-
-const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
 // Groq Whisper — transkripsi gratis
 const GROQ_WHISPER_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
@@ -41,11 +40,11 @@ export async function POST(req: NextRequest) {
     if (!groqKey)
       return NextResponse.json({ error: "GROQ_API_KEY tidak ditemukan." }, { status: 500 });
 
-    const openrouterKey = process.env.OPENROUTER_API_KEY;
-    if (!openrouterKey)
-      return NextResponse.json({ error: "OPENROUTER_API_KEY tidak ditemukan." }, { status: 500 });
+    const googleKey = process.env.GOOGLE_AI_KEY;
+    if (!googleKey)
+      return NextResponse.json({ error: "GOOGLE_AI_KEY tidak ditemukan." }, { status: 500 });
 
-    // ── 2. Transkripsi via Groq Whisper (gratis, multipart FormData) ────────
+    // ── 2. Transkripsi via Groq Whisper (gratis) ────────────────────────────
     const whisperForm = new FormData();
     whisperForm.append("file", file);
     whisperForm.append("model", GROQ_WHISPER_MODEL);
@@ -53,9 +52,7 @@ export async function POST(req: NextRequest) {
 
     const whisperRes = await fetch(GROQ_WHISPER_URL, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${groqKey}`,
-      },
+      headers: { Authorization: `Bearer ${groqKey}` },
       body: whisperForm,
     });
 
@@ -77,21 +74,11 @@ export async function POST(req: NextRequest) {
         { status: 422 }
       );
 
-    // ── 3. Analisis transkrip via Gemma 4 (fallback antar model) ───────────
-    const analysisPayload = {
-      temperature: 0.2,
-      max_tokens: 4096,
-      stream: false,
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are an enterprise meeting intelligence assistant. " +
-            "Always respond with ONLY a valid JSON object — no markdown, no backticks, no explanation.",
-        },
-        {
-          role: "user",
-          content: `Here is the transcript of an audio recording:
+    // ── 3. Analisis via Gemma 4 — Google AI Studio (fallback antar model) ───
+    const prompt = `You are an enterprise meeting intelligence assistant.
+Always respond with ONLY a valid JSON object — no markdown, no backticks, no explanation.
+
+Here is the transcript of an audio recording:
 
 ---
 ${transcript}
@@ -110,26 +97,26 @@ Rules:
 - keyPoints: 3-6 most important discussion points
 - actionItems: concrete tasks with responsible person if mentioned
 - followUpQuestions: 2-4 questions to address after this meeting
-- Return ONLY the JSON object — no preamble, no markdown fences`,
-        },
-      ],
-    };
+- Return ONLY the JSON object — no preamble, no markdown fences`;
 
     let analysisRes: Response | null = null;
     let usedModel = "";
 
     for (const model of GEMMA_MODELS) {
-      const res = await fetch(OPENROUTER_URL, {
+      const url = `${GOOGLE_AI_URL}/${model}:generateContent?key=${googleKey}`;
+      const res = await fetch(url, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${openrouterKey}`,
-          "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "https://localhost:3000",
-          "X-Title": process.env.NEXT_PUBLIC_SITE_NAME || "Audio Agent",
-        },
-        body: JSON.stringify({ model, ...analysisPayload }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature: 0.2,
+            maxOutputTokens: 4096,
+          },
+        }),
       });
 
+      // 429 = rate limit, coba model berikutnya
       if (res.status === 429) {
         console.warn(`Rate limit on ${model}, trying next...`);
         continue;
@@ -149,20 +136,15 @@ Rules:
 
     if (!analysisRes.ok) {
       const errData = await analysisRes.json().catch(() => ({}));
-      const msg = errData?.error?.message || `OpenRouter error ${analysisRes.status}`;
+      const msg = errData?.error?.message || `Google AI error ${analysisRes.status}`;
       console.error(`Gemma error (${usedModel}):`, errData);
-
-      if (analysisRes.status === 401)
-        return NextResponse.json({ error: "API key tidak valid." }, { status: 401 });
-      if (analysisRes.status === 402)
-        return NextResponse.json({ error: "Kredit OpenRouter habis." }, { status: 402 });
-
       return NextResponse.json({ error: msg }, { status: analysisRes.status });
     }
 
-    // ── 4. Parse response Gemma 4 ───────────────────────────────────────────
+    // ── 4. Parse response Google AI Studio ─────────────────────────────────
     const data = await analysisRes.json();
-    const raw: string | undefined = data?.choices?.[0]?.message?.content;
+    const raw: string | undefined =
+      data?.candidates?.[0]?.content?.parts?.[0]?.text;
 
     if (!raw) {
       console.error(`Empty Gemma response (${usedModel}):`, data);
@@ -177,7 +159,7 @@ Rules:
 
     const jsonMatch = clean.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
-      console.error(`No JSON in Gemma response (${usedModel}):`, clean.slice(0, 300));
+      console.error(`No JSON in response (${usedModel}):`, clean.slice(0, 300));
       return NextResponse.json(
         { error: "Model tidak menghasilkan JSON valid. Coba lagi." },
         { status: 500 }
