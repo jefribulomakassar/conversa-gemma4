@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 
 const MODEL = "google/gemma-4-26b-a4b-it";
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
@@ -40,49 +40,97 @@ const BRIEF_PROMPTS: Record<string, string> = {
 - Troubleshooting & Escalation`,
 };
 
-export async function POST(req: NextRequest) {
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function encodeEvent(
+  controller: ReadableStreamDefaultController<Uint8Array>,
+  encoder: TextEncoder,
+  event: string,
+  data: unknown
+) {
+  const line = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  controller.enqueue(encoder.encode(line));
+}
+
+function extractJSON(raw: string): Record<string, unknown> | null {
+  const clean = raw
+    .replace(/```json\s*/gi, "")
+    .replace(/```\s*/gi, "")
+    .trim();
+
+  const start = clean.indexOf("{");
+  const end = clean.lastIndexOf("}");
+  if (start === -1 || end === -1 || end <= start) return null;
+
+  const candidate = clean.slice(start, end + 1);
+
   try {
-    // ── 1. Parse form data ──────────────────────────────────────────────────
-    const form = await req.formData();
-    const file = form.get("file") as File | null;
-    const briefType = (form.get("briefType") as string) || "meeting";
-    // NOTE: "thinking" mode removed — thinkingConfig is Gemini-only, not supported by Gemma 4
-
-    if (!file) {
-      return NextResponse.json({ error: "No PDF file provided." }, { status: 400 });
+    return JSON.parse(candidate);
+  } catch {
+    // Truncation repair
+    let pos = candidate.lastIndexOf("}");
+    while (pos > 0) {
+      try {
+        return JSON.parse(candidate.slice(0, pos + 1));
+      } catch {
+        pos = candidate.lastIndexOf("}", pos - 1);
+      }
     }
+    return null;
+  }
+}
 
-    const maxSize = 20 * 1024 * 1024; // 20MB
-    if (file.size > maxSize) {
-      return NextResponse.json(
-        { error: "File terlalu besar. Maksimal 20MB." },
-        { status: 400 }
-      );
-    }
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-    if (file.type !== "application/pdf" && !file.name.endsWith(".pdf")) {
-      return NextResponse.json(
-        { error: "Format tidak didukung. Gunakan PDF." },
-        { status: 400 }
-      );
-    }
+// ── Main handler ─────────────────────────────────────────────────────────────
 
-    // ── 2. Check API key ────────────────────────────────────────────────────
-    const apiKey = process.env.OPENROUTER_API_KEY;
-    if (!apiKey) {
-      return NextResponse.json(
-        { error: "OPENROUTER_API_KEY tidak ditemukan." },
-        { status: 500 }
-      );
-    }
+export async function POST(req: NextRequest) {
+  const encoder = new TextEncoder();
 
-    // ── 3. Convert PDF to base64 ────────────────────────────────────────────
-    const arrayBuffer = await file.arrayBuffer();
-    const base64 = Buffer.from(arrayBuffer).toString("base64");
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const emit = (event: string, data: unknown) =>
+        encodeEvent(controller, encoder, event, data);
 
-    const briefInstruction = BRIEF_PROMPTS[briefType] || BRIEF_PROMPTS.meeting;
+      try {
+        // 1. Parse form
+        const form = await req.formData();
+        const file = form.get("file") as File | null;
+        const briefType = (form.get("briefType") as string) || "meeting";
 
-    const promptText = `You are an expert enterprise document analyst with deep experience in business strategy, project management, and professional communication.
+        if (!file) {
+          emit("error", { message: "No PDF file provided." });
+          controller.close();
+          return;
+        }
+
+        if (file.size > 20 * 1024 * 1024) {
+          emit("error", { message: "File terlalu besar. Maksimal 20MB." });
+          controller.close();
+          return;
+        }
+
+        if (file.type !== "application/pdf" && !file.name.endsWith(".pdf")) {
+          emit("error", { message: "Format tidak didukung. Gunakan PDF." });
+          controller.close();
+          return;
+        }
+
+        const apiKey = process.env.OPENROUTER_API_KEY;
+        if (!apiKey) {
+          emit("error", { message: "OPENROUTER_API_KEY tidak ditemukan." });
+          controller.close();
+          return;
+        }
+
+        // 2. Convert PDF → base64
+        emit("status", { step: "reading" });
+        const arrayBuffer = await file.arrayBuffer();
+        const base64 = Buffer.from(arrayBuffer).toString("base64");
+
+        const briefInstruction = BRIEF_PROMPTS[briefType] || BRIEF_PROMPTS.meeting;
+
+        const promptText = `You are an expert enterprise document analyst with deep experience in business strategy, project management, and professional communication.
 
 Carefully read and analyze the entire PDF document provided.
 
@@ -107,124 +155,114 @@ Rules:
 - Write in clear professional English
 - Return ONLY the JSON object — no preamble, no markdown fences`;
 
-    // ── 4. Build OpenRouter request ─────────────────────────────────────────
-    // OpenRouter supports PDF via base64 document type in content array
-    const payload = {
-      model: MODEL,
-      temperature: 0.3,
-      max_tokens: 6000,
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are an expert enterprise document analyst. " +
-            "Always respond with ONLY a valid JSON object — no markdown, no backticks, no explanation.",
-        },
-        {
-          role: "user",
-          content: [
+        // 3. Call OpenRouter
+        emit("status", { step: "analyzing" });
+
+        const payload = {
+          model: MODEL,
+          temperature: 0.3,
+          max_tokens: 6000,
+          messages: [
             {
-              // OpenRouter: PDF as base64 document
-              type: "image_url",
-              image_url: {
-                url: `data:application/pdf;base64,${base64}`,
-              },
+              role: "system",
+              content:
+                "You are an expert enterprise document analyst. " +
+                "Always respond with ONLY a valid JSON object — no markdown, no backticks, no explanation.",
             },
             {
-              type: "text",
-              text: promptText,
+              role: "user",
+              content: [
+                {
+                  type: "image_url",
+                  image_url: { url: `data:application/pdf;base64,${base64}` },
+                },
+                { type: "text", text: promptText },
+              ],
             },
           ],
-        },
-      ],
-    };
+        };
 
-    // ── 5. Call OpenRouter ──────────────────────────────────────────────────
-    const response = await fetch(OPENROUTER_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-        "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "https://localhost:3000",
-        "X-Title": process.env.NEXT_PUBLIC_SITE_NAME || "Document Agent",
-      },
-      body: JSON.stringify(payload),
-    });
+        const response = await fetch(OPENROUTER_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+            "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "https://localhost:3000",
+            "X-Title": process.env.NEXT_PUBLIC_SITE_NAME || "Document Agent",
+          },
+          body: JSON.stringify(payload),
+        });
 
-    if (!response.ok) {
-      const errData = await response.json().catch(() => ({}));
-      const msg = errData?.error?.message || `OpenRouter error ${response.status}`;
-      console.error("OpenRouter API error:", errData);
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          const statusMessages: Record<number, string> = {
+            401: "API key tidak valid. Periksa OPENROUTER_API_KEY Anda.",
+            402: "Kredit OpenRouter habis. Silakan top up akun Anda.",
+            429: "Rate limit tercapai. Coba lagi sebentar.",
+          };
+          const msg =
+            statusMessages[response.status] ||
+            errData?.error?.message ||
+            `OpenRouter error ${response.status}`;
+          emit("error", { message: msg });
+          controller.close();
+          return;
+        }
 
-      if (response.status === 401) {
-        return NextResponse.json(
-          { error: "API key tidak valid. Periksa OPENROUTER_API_KEY Anda." },
-          { status: 401 }
-        );
+        // 4. Parse response
+        emit("status", { step: "parsing" });
+
+        const data = await response.json();
+        const raw: string | undefined = data?.choices?.[0]?.message?.content;
+
+        if (!raw) {
+          emit("error", { message: "Tidak ada respons dari model." });
+          controller.close();
+          return;
+        }
+
+        const parsed = extractJSON(raw);
+
+        if (!parsed) {
+          console.error("JSON extraction failed. Raw:", raw.slice(0, 300));
+          emit("error", { message: "Model tidak menghasilkan JSON yang valid. Coba lagi." });
+          controller.close();
+          return;
+        }
+
+        // Normalize
+        if (!parsed.briefType) parsed.briefType = briefType;
+        if (!parsed.title) parsed.title = "Document Brief";
+        if (!Array.isArray(parsed.sections)) parsed.sections = [];
+
+        // 5. Stream metadata dulu
+        emit("meta", { briefType: parsed.briefType, title: parsed.title });
+        await sleep(80);
+
+        // 6. Stream sections satu per satu
+        const sections = parsed.sections as { heading: string; content: string }[];
+        for (const section of sections) {
+          emit("section", { heading: section.heading, content: section.content });
+          await sleep(100);
+        }
+
+        // 7. Done
+        emit("done", {});
+        controller.close();
+      } catch (err) {
+        console.error("Document route error:", err);
+        const msg = err instanceof Error ? err.message : "Internal server error.";
+        encodeEvent(controller, encoder, "error", { message: msg });
+        controller.close();
       }
-      if (response.status === 402) {
-        return NextResponse.json(
-          { error: "Kredit OpenRouter habis. Silakan top up akun Anda." },
-          { status: 402 }
-        );
-      }
-      if (response.status === 429) {
-        return NextResponse.json(
-          { error: "Rate limit tercapai. Coba lagi sebentar." },
-          { status: 429 }
-        );
-      }
+    },
+  });
 
-      return NextResponse.json({ error: msg }, { status: response.status });
-    }
-
-    // ── 6. Parse model response ─────────────────────────────────────────────
-    const data = await response.json();
-    const raw: string | undefined = data?.choices?.[0]?.message?.content;
-
-    if (!raw) {
-      console.error("Empty model response:", data);
-      return NextResponse.json(
-        { error: "Tidak ada respons dari model." },
-        { status: 500 }
-      );
-    }
-
-    // Strip markdown fences if model disobeys system prompt
-    const clean = raw
-      .replace(/^```json\s*/i, "")
-      .replace(/^```\s*/i, "")
-      .replace(/```\s*$/i, "")
-      .trim();
-
-    const jsonMatch = clean.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      console.error("No JSON in model response:", clean.slice(0, 300));
-      return NextResponse.json(
-        { error: "Model tidak menghasilkan JSON yang valid. Coba lagi." },
-        { status: 500 }
-      );
-    }
-
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = JSON.parse(jsonMatch[0]);
-    } catch (parseErr) {
-      console.error("JSON parse failed:", parseErr, jsonMatch[0].slice(0, 300));
-      return NextResponse.json(
-        { error: "Gagal mem-parse JSON dari model. Coba lagi." },
-        { status: 500 }
-      );
-    }
-
-    // ── 7. Validate & normalize fields ──────────────────────────────────────
-    if (!parsed.briefType) parsed.briefType = briefType;
-    if (!parsed.title) parsed.title = "Document Brief";
-    if (!Array.isArray(parsed.sections)) parsed.sections = [];
-
-    return NextResponse.json(parsed);
-  } catch (err) {
-    console.error("Document route error:", err);
-    return NextResponse.json({ error: "Internal server error." }, { status: 500 });
-  }
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  });
 }
