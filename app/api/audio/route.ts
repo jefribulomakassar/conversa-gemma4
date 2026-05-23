@@ -161,7 +161,7 @@ async function callGoogleAI(
   const fallbackRaw: string | undefined =
     fallbackData?.candidates?.[0]?.content?.parts?.[0]?.text;
 
-  if (!fallbackRaw) throw new Error("Tidak ada respons dari fallback model.");
+  if (!fallbackRaw) throw new Error("No response from fallback model.");
 
   return { raw: fallbackRaw, usedModel: FALLBACK_MODEL, isFallback: true };
 }
@@ -198,28 +198,28 @@ export async function POST(req: NextRequest) {
         }
 
         if (file.size > 25 * 1024 * 1024) {
-          emit("error", { message: "File terlalu besar. Maksimal 25MB." });
+          emit("error", { message: "The file is too large. Maximum 25MB." });
           controller.close();
           return;
         }
 
         const mimeType = file.type || "audio/mpeg";
         if (!ALLOWED_AUDIO_TYPES.includes(mimeType)) {
-          emit("error", { message: `Format tidak didukung: ${mimeType}.` });
+          emit("error", { message: `Unsupported formats: ${mimeType}.` });
           controller.close();
           return;
         }
 
         const groqKey = process.env.GROQ_API_KEY;
         if (!groqKey) {
-          emit("error", { message: "GROQ_API_KEY tidak ditemukan." });
+          emit("error", { message: "GROQ_API_KEY not found." });
           controller.close();
           return;
         }
 
         const googleKey = process.env.GOOGLE_AI_KEY;
         if (!googleKey) {
-          emit("error", { message: "GOOGLE_AI_KEY tidak ditemukan." });
+          emit("error", { message: "GOOGLE_AI_KEY not found." });
           controller.close();
           return;
         }
@@ -240,7 +240,7 @@ export async function POST(req: NextRequest) {
 
         if (!whisperRes.ok) {
           const errData = await whisperRes.json().catch(() => ({}));
-          emit("error", { message: errData?.error?.message || "Gagal mentranskripsi audio." });
+          emit("error", { message: errData?.error?.message || "Failed to transcribe audio." });
           controller.close();
           return;
         }
@@ -249,7 +249,7 @@ export async function POST(req: NextRequest) {
         const transcript: string = whisperData?.text?.trim() ?? "";
 
         if (!transcript) {
-          emit("error", { message: "Transkripsi kosong. Pastikan audio berisi percakapan." });
+          emit("error", { message: "Transcription is empty. Make sure the audio contains conversation." });
           controller.close();
           return;
         }
@@ -289,7 +289,7 @@ export async function POST(req: NextRequest) {
           _meta: {
             model: usedModel,
             isFallback,
-            warning: !parsed ? "JSON tidak valid dari model." : undefined,
+            warning: !parsed ? "Invalid JSON from model." : undefined,
           },
         });
 
