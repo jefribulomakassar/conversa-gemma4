@@ -2,8 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 
 const ANALYSIS_MODEL = "google/gemma-4-26b-a4b-it";
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-
-// Whisper via OpenRouter untuk transkripsi audio
 const WHISPER_URL = "https://openrouter.ai/api/v1/audio/transcriptions";
 
 const ALLOWED_AUDIO_TYPES = [
@@ -11,6 +9,17 @@ const ALLOWED_AUDIO_TYPES = [
   "audio/x-wav", "audio/mp4", "audio/m4a", "audio/x-m4a",
   "audio/ogg", "audio/webm", "audio/flac", "audio/aac",
 ];
+
+// Map MIME type → format string yang diterima Whisper
+const MIME_TO_FORMAT: Record<string, string> = {
+  "audio/mpeg": "mp3", "audio/mp3": "mp3",
+  "audio/wav": "wav", "audio/wave": "wav", "audio/x-wav": "wav",
+  "audio/mp4": "mp4", "audio/m4a": "mp4", "audio/x-m4a": "mp4",
+  "audio/ogg": "ogg",
+  "audio/webm": "webm",
+  "audio/flac": "flac",
+  "audio/aac": "aac",
+};
 
 export async function POST(req: NextRequest) {
   try {
@@ -40,19 +49,27 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "OPENROUTER_API_KEY tidak ditemukan." }, { status: 500 });
     }
 
-    // ── 2. Transkripsi audio via Whisper ────────────────────────────────────
-    const whisperForm = new FormData();
-    whisperForm.append("file", file);
-    whisperForm.append("model", "openai/whisper-large-v3");
+    // ── 2. Konversi audio ke base64 ─────────────────────────────────────────
+    const arrayBuffer = await file.arrayBuffer();
+    const base64Audio = Buffer.from(arrayBuffer).toString("base64");
+    const audioFormat = MIME_TO_FORMAT[mimeType] ?? "mp3";
+
+    // ── 3. Transkripsi via Whisper (OpenRouter audio transcriptions endpoint) ─
+    const whisperPayload = {
+      model: "openai/whisper-1",
+      input: base64Audio,
+      input_format: audioFormat,
+    };
 
     const whisperRes = await fetch(WHISPER_URL, {
       method: "POST",
       headers: {
+        "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
         "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "https://localhost:3000",
         "X-Title": process.env.NEXT_PUBLIC_SITE_NAME || "Audio Agent",
       },
-      body: whisperForm,
+      body: JSON.stringify(whisperPayload),
     });
 
     if (!whisperRes.ok) {
@@ -65,13 +82,17 @@ export async function POST(req: NextRequest) {
     }
 
     const whisperData = await whisperRes.json();
+    // OpenRouter returns { text: "..." } sama seperti OpenAI
     const transcript: string = whisperData?.text || "";
 
     if (!transcript.trim()) {
-      return NextResponse.json({ error: "Transkripsi kosong. Pastikan audio berisi percakapan." }, { status: 422 });
+      return NextResponse.json(
+        { error: "Transkripsi kosong. Pastikan audio berisi percakapan." },
+        { status: 422 }
+      );
     }
 
-    // ── 3. Analisis transkrip via Gemma 4 ───────────────────────────────────
+    // ── 4. Analisis transkrip via Gemma 4 ───────────────────────────────────
     const payload = {
       model: ANALYSIS_MODEL,
       temperature: 0.2,
@@ -136,7 +157,7 @@ Rules:
       return NextResponse.json({ error: msg }, { status: response.status });
     }
 
-    // ── 4. Parse response Gemma 4 ───────────────────────────────────────────
+    // ── 5. Parse response Gemma 4 ───────────────────────────────────────────
     const data = await response.json();
     const raw: string | undefined = data?.choices?.[0]?.message?.content;
 
@@ -154,7 +175,10 @@ Rules:
     const jsonMatch = clean.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
       console.error("No JSON in model response:", clean.slice(0, 300));
-      return NextResponse.json({ error: "Model tidak menghasilkan JSON yang valid. Coba lagi." }, { status: 500 });
+      return NextResponse.json(
+        { error: "Model tidak menghasilkan JSON yang valid. Coba lagi." },
+        { status: 500 }
+      );
     }
 
     let parsed: Record<string, unknown>;
@@ -162,11 +186,14 @@ Rules:
       parsed = JSON.parse(jsonMatch[0]);
     } catch (parseErr) {
       console.error("JSON parse failed:", parseErr);
-      return NextResponse.json({ error: "Gagal mem-parse JSON dari model. Coba lagi." }, { status: 500 });
+      return NextResponse.json(
+        { error: "Gagal mem-parse JSON dari model. Coba lagi." },
+        { status: 500 }
+      );
     }
 
-    // ── 5. Normalize fields ─────────────────────────────────────────────────
-    if (!parsed.transcript) parsed.transcript = transcript; // fallback ke hasil Whisper
+    // ── 6. Normalize fields ─────────────────────────────────────────────────
+    if (!parsed.transcript) parsed.transcript = transcript;
     if (!Array.isArray(parsed.keyPoints)) parsed.keyPoints = [];
     if (!Array.isArray(parsed.actionItems)) parsed.actionItems = [];
     if (!Array.isArray(parsed.followUpQuestions)) parsed.followUpQuestions = [];
