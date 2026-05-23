@@ -105,20 +105,20 @@ export async function POST(req: NextRequest) {
         }
 
         if (file.size > 20 * 1024 * 1024) {
-          emit("error", { message: "File terlalu besar. Maksimal 20MB." });
+          emit("error", { message: "The file is too large. Maximum 20MB." });
           controller.close();
           return;
         }
 
         if (file.type !== "application/pdf" && !file.name.endsWith(".pdf")) {
-          emit("error", { message: "Format tidak didukung. Gunakan PDF." });
+          emit("error", { message: "Format not supported. Use PDF." });
           controller.close();
           return;
         }
 
         const apiKey = process.env.OPENROUTER_API_KEY;
         if (!apiKey) {
-          emit("error", { message: "OPENROUTER_API_KEY tidak ditemukan." });
+          emit("error", { message: "OPENROUTER_API_KEY not found." });
           controller.close();
           return;
         }
@@ -196,9 +196,9 @@ Rules:
         if (!response.ok) {
           const errData = await response.json().catch(() => ({}));
           const statusMessages: Record<number, string> = {
-            401: "API key tidak valid. Periksa OPENROUTER_API_KEY Anda.",
-            402: "Kredit OpenRouter habis. Silakan top up akun Anda.",
-            429: "Rate limit tercapai. Coba lagi sebentar.",
+            401: "Invalid API key. Check your OPENROUTER_API_KEY.",
+            402: "OpenRouter credit is depleted. Please top up your account.",
+            429: "Rate limit reached. Please try again shortly.",
           };
           const msg =
             statusMessages[response.status] ||
@@ -216,7 +216,7 @@ Rules:
         const raw: string | undefined = data?.choices?.[0]?.message?.content;
 
         if (!raw) {
-          emit("error", { message: "Tidak ada respons dari model." });
+          emit("error", { message: "No response from the model." });
           controller.close();
           return;
         }
@@ -225,7 +225,7 @@ Rules:
 
         if (!parsed) {
           console.error("JSON extraction failed. Raw:", raw.slice(0, 300));
-          emit("error", { message: "Model tidak menghasilkan JSON yang valid. Coba lagi." });
+          emit("error", { message: "The model did not produce valid JSON. Please try again." });
           controller.close();
           return;
         }
