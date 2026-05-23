@@ -1,30 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
 
+// Gemma 4 = model inti hackathon (analisis)
 const ANALYSIS_MODEL = "google/gemma-4-26b-a4b-it";
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
+
+// Groq Whisper = transkripsi GRATIS
+const GROQ_WHISPER_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
+const GROQ_WHISPER_MODEL = "whisper-large-v3-turbo"; // paling cepat & gratis
 
 const ALLOWED_AUDIO_TYPES = [
   "audio/mpeg", "audio/mp3", "audio/wav", "audio/wave",
   "audio/x-wav", "audio/mp4", "audio/m4a", "audio/x-m4a",
   "audio/ogg", "audio/webm", "audio/flac", "audio/aac",
 ];
-
-const MIME_TO_FORMAT: Record<string, string> = {
-  "audio/mpeg": "mp3", "audio/mp3": "mp3",
-  "audio/wav": "wav", "audio/wave": "wav", "audio/x-wav": "wav",
-  "audio/mp4": "mp4", "audio/m4a": "mp4", "audio/x-m4a": "mp4",
-  "audio/ogg": "ogg",
-  "audio/webm": "webm",
-  "audio/flac": "flac",
-  "audio/aac": "aac",
-};
-
-const HEADERS = (apiKey: string) => ({
-  "Content-Type": "application/json",
-  Authorization: `Bearer ${apiKey}`,
-  "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "https://localhost:3000",
-  "X-Title": process.env.NEXT_PUBLIC_SITE_NAME || "Audio Agent",
-});
 
 export async function POST(req: NextRequest) {
   try {
@@ -35,8 +23,8 @@ export async function POST(req: NextRequest) {
     if (!file)
       return NextResponse.json({ error: "No audio file provided." }, { status: 400 });
 
-    if (file.size > 20 * 1024 * 1024)
-      return NextResponse.json({ error: "File terlalu besar. Maksimal 20MB." }, { status: 400 });
+    if (file.size > 25 * 1024 * 1024)
+      return NextResponse.json({ error: "File terlalu besar. Maksimal 25MB." }, { status: 400 });
 
     const mimeType = file.type || "audio/mpeg";
     if (!ALLOWED_AUDIO_TYPES.includes(mimeType))
@@ -45,49 +33,33 @@ export async function POST(req: NextRequest) {
         { status: 400 }
       );
 
-    const apiKey = process.env.OPENROUTER_API_KEY;
-    if (!apiKey)
+    const groqKey = process.env.GROQ_API_KEY;
+    if (!groqKey)
+      return NextResponse.json({ error: "GROQ_API_KEY tidak ditemukan." }, { status: 500 });
+
+    const openrouterKey = process.env.OPENROUTER_API_KEY;
+    if (!openrouterKey)
       return NextResponse.json({ error: "OPENROUTER_API_KEY tidak ditemukan." }, { status: 500 });
 
-    // ── 2. Encode audio ke base64 ───────────────────────────────────────────
-    const arrayBuffer = await file.arrayBuffer();
-    const base64Audio = Buffer.from(arrayBuffer).toString("base64");
-    const audioFormat = MIME_TO_FORMAT[mimeType] ?? "mp3";
+    // ── 2. Transkripsi via Groq Whisper (gratis, multipart FormData) ────────
+    const whisperForm = new FormData();
+    whisperForm.append("file", file);
+    whisperForm.append("model", GROQ_WHISPER_MODEL);
+    whisperForm.append("response_format", "json");
+    // opsional: tambah language hint untuk akurasi lebih baik
+    // whisperForm.append("language", "id"); // uncomment jika audio dominan Bahasa Indonesia
 
-    // ── 3. Transkripsi via Whisper — pakai /chat/completions + input_audio ──
-    //    Model audio-capable yang support input_audio: openai/gpt-4o-audio-preview
-    //    Whisper-1 di OpenRouter hanya tersedia lewat /audio/transcriptions (multipart),
-    //    fallback ke gpt-4o-audio-preview yang support input_audio content block.
-    const whisperRes = await fetch(OPENROUTER_URL, {
+    const whisperRes = await fetch(GROQ_WHISPER_URL, {
       method: "POST",
-      headers: HEADERS(apiKey),
-      body: JSON.stringify({
-        model: "openai/gpt-4o-audio-preview",
-        max_tokens: 4096,
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: "Please transcribe this audio file accurately. Return ONLY the transcription text, nothing else.",
-              },
-              {
-                type: "input_audio",
-                input_audio: {
-                  data: base64Audio,
-                  format: audioFormat,
-                },
-              },
-            ],
-          },
-        ],
-      }),
+      headers: {
+        Authorization: `Bearer ${groqKey}`,
+      },
+      body: whisperForm,
     });
 
     if (!whisperRes.ok) {
       const errData = await whisperRes.json().catch(() => ({}));
-      console.error("Whisper/transcription error:", errData);
+      console.error("Groq Whisper error:", errData);
       return NextResponse.json(
         { error: errData?.error?.message || "Gagal mentranskripsi audio." },
         { status: whisperRes.status }
@@ -95,8 +67,7 @@ export async function POST(req: NextRequest) {
     }
 
     const whisperData = await whisperRes.json();
-    const transcript: string =
-      whisperData?.choices?.[0]?.message?.content?.trim() ?? "";
+    const transcript: string = whisperData?.text?.trim() ?? "";
 
     if (!transcript)
       return NextResponse.json(
@@ -104,10 +75,15 @@ export async function POST(req: NextRequest) {
         { status: 422 }
       );
 
-    // ── 4. Analisis transkrip via Gemma 4 (model inti hackathon) ────────────
+    // ── 3. Analisis transkrip via Gemma 4 (model inti hackathon) ────────────
     const analysisRes = await fetch(OPENROUTER_URL, {
       method: "POST",
-      headers: HEADERS(apiKey),
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${openrouterKey}`,
+        "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "https://localhost:3000",
+        "X-Title": process.env.NEXT_PUBLIC_SITE_NAME || "Audio Agent",
+      },
       body: JSON.stringify({
         model: ANALYSIS_MODEL,
         temperature: 0.2,
@@ -162,7 +138,7 @@ Rules:
       return NextResponse.json({ error: msg }, { status: analysisRes.status });
     }
 
-    // ── 5. Parse response Gemma 4 ───────────────────────────────────────────
+    // ── 4. Parse response Gemma 4 ───────────────────────────────────────────
     const data = await analysisRes.json();
     const raw: string | undefined = data?.choices?.[0]?.message?.content;
 
@@ -193,7 +169,7 @@ Rules:
       return NextResponse.json({ error: "Gagal parse JSON dari model." }, { status: 500 });
     }
 
-    // ── 6. Normalize ────────────────────────────────────────────────────────
+    // ── 5. Normalize ────────────────────────────────────────────────────────
     if (!parsed.transcript) parsed.transcript = transcript;
     if (!Array.isArray(parsed.keyPoints)) parsed.keyPoints = [];
     if (!Array.isArray(parsed.actionItems)) parsed.actionItems = [];
