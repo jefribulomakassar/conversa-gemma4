@@ -2,11 +2,13 @@
 
 import { useState, useRef } from "react";
 
+type StreamStep = "idle" | "reading" | "analyzing" | "parsing" | "done";
+
 type Result = {
-  extractedText: string;
-  diagramDescription: string;
-  structuredSummary: string;
-  nextSteps: string[];
+  extractedText?: string;
+  diagramDescription?: string;
+  structuredSummary?: string;
+  nextSteps?: string[];
 };
 
 export default function ImagePage() {
@@ -14,18 +16,20 @@ export default function ImagePage() {
   const [preview, setPreview] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<Result | null>(null);
+  const [step, setStep] = useState<StreamStep>("idle");
+  const [result, setResult] = useState<Result>({});
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  const hasAnyResult = Object.keys(result).length > 0;
+
   const handleFile = (f: File) => {
-    const allowed = ["image/jpeg", "image/png", "image/webp"];
-    if (!allowed.includes(f.type)) {
+    if (!["image/jpeg", "image/png", "image/webp"].includes(f.type)) {
       setError("Format tidak didukung. Gunakan JPG, PNG, atau WEBP.");
       return;
     }
     setError(null);
-    setResult(null);
+    setResult({});
     setFile(f);
     const reader = new FileReader();
     reader.onload = (e) => setPreview(e.target?.result as string);
@@ -41,23 +45,68 @@ export default function ImagePage() {
   const handleSubmit = async () => {
     if (!file) return;
     setLoading(true);
+    setStep("idle");
     setError(null);
-    setResult(null);
+    setResult({});
+
     try {
       const form = new FormData();
       form.append("file", file);
+
       const res = await fetch("/api/image", { method: "POST", body: form });
-      if (!res.ok) throw new Error((await res.json()).error || "Gagal memproses gambar.");
-      const data = await res.json();
-      setResult(data);
+      if (!res.ok || !res.body) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData?.error || "Gagal memproses gambar.");
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split("\n\n");
+        buffer = events.pop() ?? "";
+
+        for (const raw of events) {
+          if (!raw.trim()) continue;
+          const eventMatch = raw.match(/^event: (\w+)/m);
+          const dataMatch = raw.match(/^data: (.+)/m);
+          if (!eventMatch || !dataMatch) continue;
+
+          const eventName = eventMatch[1];
+          let payload: Record<string, unknown>;
+          try { payload = JSON.parse(dataMatch[1]); } catch { continue; }
+
+          switch (eventName) {
+            case "status": setStep(payload.step as StreamStep); break;
+            case "extractedText": setResult((p) => ({ ...p, extractedText: payload.text as string })); break;
+            case "diagramDescription": setResult((p) => ({ ...p, diagramDescription: payload.text as string })); break;
+            case "structuredSummary": setResult((p) => ({ ...p, structuredSummary: payload.text as string })); break;
+            case "nextSteps": setResult((p) => ({ ...p, nextSteps: payload.items as string[] })); break;
+            case "done": setStep("done"); break;
+            case "error": throw new Error(payload.message as string);
+          }
+        }
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Terjadi kesalahan.");
     } finally {
       setLoading(false);
+      setStep("done");
     }
   };
 
-  const reset = () => { setFile(null); setPreview(null); setResult(null); setError(null); };
+  const reset = () => { setFile(null); setPreview(null); setResult({}); setError(null); setStep("idle"); };
+
+  const stepLabel: Record<string, string> = {
+    reading: "Membaca dan mengkonversi gambar…",
+    analyzing: "Gemma 4 menganalisis gambar…",
+    parsing: "Memproses hasil analisis…",
+  };
 
   return (
     <>
@@ -96,7 +145,6 @@ export default function ImagePage() {
           background: #0D0F14; position: relative; }
         .dropzone.drag { border-color: #4F8EF7; background: #4F8EF708; }
         .dropzone.has-file { border-style: solid; border-color: #4F8EF755; padding: 20px; }
-
         .dz-icon { font-size: 40px; margin-bottom: 14px; display: block;
           filter: drop-shadow(0 0 14px #4F8EF766); }
         .dz-label { font-family: 'Syne', sans-serif; font-size: 16px; font-weight: 600;
@@ -108,12 +156,10 @@ export default function ImagePage() {
         .preview-img { width: 100%; max-height: 320px; object-fit: contain;
           border-radius: 12px; display: block; }
         .preview-badge { position: absolute; top: 10px; right: 10px;
-          background: #07080Acc; border: 1px solid #4F8EF733;
-          border-radius: 100px; padding: 5px 12px;
-          font-size: 12px; color: #4F8EF7; font-weight: 500;
+          background: #07080Acc; border: 1px solid #4F8EF733; border-radius: 100px;
+          padding: 5px 12px; font-size: 12px; color: #4F8EF7; font-weight: 500;
           backdrop-filter: blur(8px); }
-        .preview-change { margin-top: 12px; font-size: 12px; color: #4B5470;
-          text-align: center; }
+        .preview-change { margin-top: 12px; font-size: 12px; color: #4B5470; text-align: center; }
         .preview-change span { color: #4F8EF7; cursor: pointer; font-weight: 500; }
         .preview-change span:hover { text-decoration: underline; }
 
@@ -124,14 +170,23 @@ export default function ImagePage() {
         .btn-primary:hover:not(:disabled) { opacity: 0.88; transform: translateY(-1px); }
         .btn-primary:disabled { opacity: 0.35; cursor: not-allowed; }
 
+        /* Status bar */
+        .status-bar { display: flex; align-items: center; gap: 10px;
+          padding: 12px 16px; background: #0D0F14; border: 1px solid #1E2230;
+          border-radius: 10px; margin-top: 20px; font-size: 13px; color: #6B7285; }
+        .status-spinner { width: 14px; height: 14px; border-radius: 50%;
+          border: 2px solid #1E2230; border-top-color: #4F8EF7;
+          animation: spin 0.8s linear infinite; flex-shrink: 0; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Loading (sebelum result pertama) */
         .loading { text-align: center; padding: 48px 0; }
         .scan { width: 56px; height: 56px; border-radius: 12px; background: #0D0F14;
-          border: 1px solid #4F8EF733; margin: 0 auto 20px;
-          position: relative; overflow: hidden; }
+          border: 1px solid #4F8EF733; margin: 0 auto 20px; position: relative; overflow: hidden; }
         .scan-line { position: absolute; left: 0; right: 0; height: 2px;
           background: linear-gradient(90deg, transparent, #4F8EF7, transparent);
-          animation: scan 1.6s ease-in-out infinite; }
-        @keyframes scan { 0%{top:0%} 100%{top:100%} }
+          animation: scanMove 1.6s ease-in-out infinite; }
+        @keyframes scanMove { 0%{top:0%} 100%{top:100%} }
         .scan-icon { position: absolute; inset: 0; display: flex; align-items: center;
           justify-content: center; font-size: 22px; }
         .loading-text { font-size: 14px; color: #4B5470; }
@@ -139,9 +194,25 @@ export default function ImagePage() {
         .error { background: #1A0E0E; border: 1px solid #FF6B6B33; border-radius: 12px;
           padding: 14px 18px; font-size: 13px; color: #FF8080; margin-top: 16px; }
 
+        /* Results */
         .results { margin-top: 40px; display: flex; flex-direction: column; gap: 20px; }
 
-        .section { background: #0D0F14; border: 1px solid #1E2230; border-radius: 16px; overflow: hidden; }
+        .section { background: #0D0F14; border: 1px solid #1E2230; border-radius: 16px;
+          overflow: hidden; animation: fadeSlideIn 0.4s ease both; }
+        @keyframes fadeSlideIn {
+          from { opacity: 0; transform: translateY(10px); }
+          to   { opacity: 1; transform: translateY(0); }
+        }
+
+        .section-skeleton { background: #0D0F14; border: 1px solid #1E2230;
+          border-radius: 16px; padding: 16px 24px 20px; }
+        .skeleton { background: linear-gradient(90deg, #1E2230 25%, #262B3D 50%, #1E2230 75%);
+          background-size: 200% 100%; animation: shimmer 1.4s ease-in-out infinite; border-radius: 4px; }
+        @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
+        .skeleton-header { height: 13px; width: 30%; margin-bottom: 16px; }
+        .skeleton-line { height: 13px; margin-bottom: 10px; }
+        .skeleton-line:last-child { width: 60%; margin-bottom: 0; }
+
         .section-header { padding: 16px 24px; border-bottom: 1px solid #1A1D28;
           display: flex; align-items: center; gap: 10px; }
         .section-icon { font-size: 18px; }
@@ -151,15 +222,15 @@ export default function ImagePage() {
 
         .text-block { font-size: 14px; line-height: 1.8; color: #8891A8;
           font-weight: 300; white-space: pre-wrap; }
-        .summary-block { font-size: 14px; line-height: 1.8; color: #A8B0CC;
-          font-weight: 300; }
+        .summary-block { font-size: 14px; line-height: 1.8; color: #A8B0CC; font-weight: 300; }
 
         .list { list-style: none; display: flex; flex-direction: column; gap: 10px; }
-        .list li { display: flex; gap: 12px; font-size: 14px; line-height: 1.6; color: #A8B0CC; }
+        .list li { display: flex; gap: 12px; font-size: 14px; line-height: 1.6; color: #A8B0CC;
+          animation: fadeSlideIn 0.3s ease both; }
         .list li::before { content: ''; width: 6px; height: 6px; border-radius: 50%;
           background: #4F8EF7; flex-shrink: 0; margin-top: 7px; }
 
-        .btn-reset { margin-top: 28px; width: 100%; padding: 13px;
+        .btn-reset { margin-top: 8px; width: 100%; padding: 13px;
           background: transparent; border: 1px solid #1E2230; border-radius: 12px;
           font-family: 'DM Sans', sans-serif; font-size: 14px; color: #4B5470;
           cursor: pointer; transition: border-color 0.2s, color 0.2s; }
@@ -182,7 +253,8 @@ export default function ImagePage() {
           </p>
         </div>
 
-        {!result && (
+        {/* Upload form — sembunyikan begitu result pertama datang */}
+        {!hasAnyResult && (
           <>
             <div
               className={`dropzone${dragging ? " drag" : ""}${file ? " has-file" : ""}`}
@@ -222,7 +294,16 @@ export default function ImagePage() {
           </>
         )}
 
-        {loading && (
+        {/* Status bar */}
+        {loading && step !== "idle" && (
+          <div className="status-bar">
+            <div className="status-spinner" />
+            {stepLabel[step] ?? "Memproses…"}
+          </div>
+        )}
+
+        {/* Scan animation — hanya sebelum result pertama */}
+        {loading && !hasAnyResult && (
           <div className="loading">
             <div className="scan">
               <div className="scan-line" />
@@ -232,51 +313,75 @@ export default function ImagePage() {
           </div>
         )}
 
-        {result && (
+        {/* Results — muncul bertahap */}
+        {hasAnyResult && (
           <div className="results">
-            <div className="section">
-              <div className="section-header">
-                <span className="section-icon">🔤</span>
-                <span className="section-title">Extracted Text</span>
-              </div>
-              <div className="section-body">
-                <p className="text-block">{result.extractedText}</p>
-              </div>
-            </div>
 
-            <div className="section">
-              <div className="section-header">
-                <span className="section-icon">📐</span>
-                <span className="section-title">Diagrams & Visual Elements</span>
+            {result.extractedText ? (
+              <div className="section">
+                <div className="section-header"><span className="section-icon">🔤</span><span className="section-title">Extracted Text</span></div>
+                <div className="section-body"><p className="text-block">{result.extractedText}</p></div>
               </div>
-              <div className="section-body">
-                <p className="text-block">{result.diagramDescription}</p>
+            ) : loading ? (
+              <div className="section-skeleton">
+                <div className="skeleton skeleton-header" />
+                <div className="skeleton skeleton-line" style={{ width: "95%" }} />
+                <div className="skeleton skeleton-line" style={{ width: "80%" }} />
+                <div className="skeleton skeleton-line" />
               </div>
-            </div>
+            ) : null}
 
-            <div className="section">
-              <div className="section-header">
-                <span className="section-icon">📋</span>
-                <span className="section-title">Structured Summary</span>
+            {result.diagramDescription ? (
+              <div className="section">
+                <div className="section-header"><span className="section-icon">📐</span><span className="section-title">Diagrams & Visual Elements</span></div>
+                <div className="section-body"><p className="text-block">{result.diagramDescription}</p></div>
               </div>
-              <div className="section-body">
-                <p className="summary-block">{result.structuredSummary}</p>
+            ) : loading ? (
+              <div className="section-skeleton">
+                <div className="skeleton skeleton-header" />
+                <div className="skeleton skeleton-line" style={{ width: "88%" }} />
+                <div className="skeleton skeleton-line" />
               </div>
-            </div>
+            ) : null}
 
-            <div className="section">
-              <div className="section-header">
-                <span className="section-icon">🚀</span>
-                <span className="section-title">Suggested Next Steps</span>
+            {result.structuredSummary ? (
+              <div className="section">
+                <div className="section-header"><span className="section-icon">📋</span><span className="section-title">Structured Summary</span></div>
+                <div className="section-body"><p className="summary-block">{result.structuredSummary}</p></div>
               </div>
-              <div className="section-body">
-                <ul className="list">
-                  {result.nextSteps.map((s, i) => <li key={i}>{s}</li>)}
-                </ul>
+            ) : loading ? (
+              <div className="section-skeleton">
+                <div className="skeleton skeleton-header" />
+                <div className="skeleton skeleton-line" style={{ width: "92%" }} />
+                <div className="skeleton skeleton-line" style={{ width: "75%" }} />
+                <div className="skeleton skeleton-line" />
               </div>
-            </div>
+            ) : null}
 
-            <button className="btn-reset" onClick={reset}>← Analyze another image</button>
+            {result.nextSteps?.length ? (
+              <div className="section">
+                <div className="section-header"><span className="section-icon">🚀</span><span className="section-title">Suggested Next Steps</span></div>
+                <div className="section-body">
+                  <ul className="list">
+                    {result.nextSteps.map((s, i) => (
+                      <li key={i} style={{ animationDelay: `${i * 60}ms` }}>{s}</li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            ) : loading ? (
+              <div className="section-skeleton">
+                <div className="skeleton skeleton-header" />
+                <div className="skeleton skeleton-line" style={{ width: "70%" }} />
+                <div className="skeleton skeleton-line" style={{ width: "55%" }} />
+              </div>
+            ) : null}
+
+            {step === "done" && !loading && (
+              <button className="btn-reset" onClick={reset}>← Analyze another image</button>
+            )}
+
+            {error && <div className="error">⚠️ {error}</div>}
           </div>
         )}
       </div>
