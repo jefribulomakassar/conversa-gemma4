@@ -11,6 +11,75 @@ type Result = {
 
 type StreamStep = "idle" | "transcribing" | "analyzing" | "done";
 
+const MAX_SIZE = 25 * 1024 * 1024; // 25MB
+const TARGET_SAMPLE_RATE = 16000;
+
+async function compressAudio(file: File): Promise<File> {
+  const arrayBuffer = await file.arrayBuffer();
+  const audioCtx = new AudioContext();
+  const decoded = await audioCtx.decodeAudioData(arrayBuffer);
+
+  // Resample ke 16kHz mono via OfflineAudioContext
+  const duration = decoded.duration;
+  const targetSamples = Math.ceil(duration * TARGET_SAMPLE_RATE);
+  const offlineCtx = new OfflineAudioContext(1, targetSamples, TARGET_SAMPLE_RATE);
+
+  const source = offlineCtx.createBufferSource();
+  source.buffer = decoded;
+  source.connect(offlineCtx.destination);
+  source.start(0);
+
+  const rendered = await offlineCtx.startRendering();
+  await audioCtx.close();
+
+  // Encode ke WAV 16-bit PCM
+  const pcm = rendered.getChannelData(0);
+  const wavBuffer = encodeWAV(pcm, TARGET_SAMPLE_RATE);
+
+  return new File([wavBuffer], file.name.replace(/\.[^.]+$/, ".wav"), {
+    type: "audio/wav",
+  });
+}
+
+function encodeWAV(samples: Float32Array, sampleRate: number): ArrayBuffer {
+  const numSamples = samples.length;
+  const bitsPerSample = 16;
+  const numChannels = 1;
+  const blockAlign = (numChannels * bitsPerSample) / 8;
+  const byteRate = sampleRate * blockAlign;
+  const dataSize = numSamples * blockAlign;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+
+  const writeStr = (offset: number, str: string) => {
+    for (let i = 0; i < str.length; i++)
+      view.setUint8(offset + i, str.charCodeAt(i));
+  };
+
+  writeStr(0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeStr(8, "WAVE");
+  writeStr(12, "fmt ");
+  view.setUint32(16, 16, true);         // chunk size
+  view.setUint16(20, 1, true);          // PCM
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitsPerSample, true);
+  writeStr(36, "data");
+  view.setUint32(40, dataSize, true);
+
+  let offset = 44;
+  for (let i = 0; i < numSamples; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    offset += 2;
+  }
+
+  return buffer;
+}
+
 export default function AudioPage() {
   const [file, setFile] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -18,6 +87,7 @@ export default function AudioPage() {
   const [step, setStep] = useState<StreamStep>("idle");
   const [result, setResult] = useState<Partial<Result> | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [compressing, setCompressing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const handleFile = (f: File) => {
@@ -45,8 +115,26 @@ export default function AudioPage() {
     setResult(null);
 
     try {
+      // Kompres jika > 25MB
+      let uploadFile = file;
+      if (file.size > MAX_SIZE) {
+        setCompressing(true);
+        try {
+          uploadFile = await compressAudio(file);
+        } catch {
+          throw new Error("Failed to compress audio. Try a smaller file.");
+        } finally {
+          setCompressing(false);
+        }
+
+        // Validasi ukuran setelah kompresi
+        if (uploadFile.size > MAX_SIZE) {
+          throw new Error("File still too large after compression. Please trim the recording.");
+        }
+      }
+
       const form = new FormData();
-      form.append("file", file);
+      form.append("file", uploadFile);
 
       const res = await fetch("/api/audio", { method: "POST", body: form });
 
@@ -55,7 +143,6 @@ export default function AudioPage() {
         throw new Error(errData?.error || "Failed to process audio.");
       }
 
-      // Baca stream SSE
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
@@ -65,15 +152,12 @@ export default function AudioPage() {
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
-
-        // Proses semua event yang sudah lengkap di buffer
         const events = buffer.split("\n\n");
-        buffer = events.pop() ?? ""; // Sisakan event yang belum lengkap
+        buffer = events.pop() ?? "";
 
         for (const raw of events) {
           if (!raw.trim()) continue;
 
-          // Parse event name dan data
           const eventMatch = raw.match(/^event: (\w+)/m);
           const dataMatch = raw.match(/^data: (.+)/m);
           if (!eventMatch || !dataMatch) continue;
@@ -86,41 +170,35 @@ export default function AudioPage() {
             continue;
           }
 
-          // Dispatch tiap event ke state
           switch (eventName) {
             case "status":
               setStep(payload.step as StreamStep);
               break;
-
             case "transcript":
               setResult((prev) => ({ ...prev, transcript: payload.text as string }));
               break;
-
             case "keyPoints":
               setResult((prev) => ({ ...prev, keyPoints: payload.items as string[] }));
               break;
-
             case "actionItems":
               setResult((prev) => ({ ...prev, actionItems: payload.items as string[] }));
               break;
-
             case "followUpQuestions":
               setResult((prev) => ({ ...prev, followUpQuestions: payload.items as string[] }));
               break;
-
             case "done":
               setStep("done");
               break;
-
             case "error":
               throw new Error(payload.message as string);
           }
         }
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Terjadi kesalahan.");
+      setError(err instanceof Error ? err.message : "An error occurred.");
     } finally {
       setLoading(false);
+      setCompressing(false);
       setStep("done");
     }
   };
@@ -144,6 +222,9 @@ export default function AudioPage() {
     result.actionItems?.length ||
     result.followUpQuestions?.length
   );
+
+  const fileSizeMB = file ? (file.size / 1024 / 1024).toFixed(1) : null;
+  const needsCompression = file && file.size > MAX_SIZE;
 
   return (
     <>
@@ -178,7 +259,6 @@ export default function AudioPage() {
 
         .subtitle { margin-top: 10px; font-size: 15px; font-weight: 300; color: #6B7285; line-height: 1.65; }
 
-        /* Dropzone */
         .dropzone { border: 1.5px dashed #1E2230; border-radius: 18px; padding: 48px 32px;
           text-align: center; cursor: pointer; transition: border-color 0.2s, background 0.2s;
           background: #0D0F14; position: relative; }
@@ -200,6 +280,10 @@ export default function AudioPage() {
           transition: color 0.2s; }
         .file-chip button:hover { color: #FF6B6B; }
 
+        .compress-badge { display: inline-flex; align-items: center; gap: 6px;
+          background: #1A1400; border: 1px solid #EF9F2733; border-radius: 100px;
+          padding: 5px 12px; font-size: 12px; color: #EF9F27; margin-top: 10px; }
+
         .btn-primary { width: 100%; margin-top: 20px; padding: 16px;
           background: #00C9A7; color: #07080A; border: none; border-radius: 12px;
           font-family: 'Syne', sans-serif; font-size: 15px; font-weight: 700;
@@ -207,7 +291,6 @@ export default function AudioPage() {
         .btn-primary:hover:not(:disabled) { opacity: 0.88; transform: translateY(-1px); }
         .btn-primary:disabled { opacity: 0.35; cursor: not-allowed; }
 
-        /* Status bar */
         .status-bar { display: flex; align-items: center; gap: 10px;
           padding: 12px 16px; background: #0D0F14; border: 1px solid #1E2230;
           border-radius: 10px; margin-top: 20px; font-size: 13px; color: #6B7285; }
@@ -216,7 +299,6 @@ export default function AudioPage() {
           animation: spin 0.8s linear infinite; flex-shrink: 0; }
         @keyframes spin { to { transform: rotate(360deg); } }
 
-        /* Wave (saat transcribing, sebelum result ada) */
         .loading { text-align: center; padding: 48px 0; }
         .wave { display: flex; gap: 6px; justify-content: center; margin-bottom: 20px; }
         .wave span { width: 4px; border-radius: 4px; background: #00C9A7;
@@ -229,11 +311,9 @@ export default function AudioPage() {
         @keyframes wave { 0%,100%{transform:scaleY(0.4)} 50%{transform:scaleY(1)} }
         .loading-text { font-size: 14px; color: #4B5470; }
 
-        /* Error */
         .error { background: #1A0E0E; border: 1px solid #FF6B6B33; border-radius: 12px;
           padding: 14px 18px; font-size: 13px; color: #FF8080; margin-top: 16px; }
 
-        /* Results */
         .results { margin-top: 40px; display: flex; flex-direction: column; gap: 20px; }
 
         .section { background: #0D0F14; border: 1px solid #1E2230; border-radius: 16px; overflow: hidden;
@@ -249,7 +329,6 @@ export default function AudioPage() {
         .section-title { font-family: 'Syne', sans-serif; font-size: 14px; font-weight: 700;
           letter-spacing: 0.04em; text-transform: uppercase; color: #8891A8; }
 
-        /* Skeleton shimmer saat section masih loading */
         .skeleton { border-radius: 6px; background: linear-gradient(90deg, #1E2230 25%, #262B3D 50%, #1E2230 75%);
           background-size: 200% 100%; animation: shimmer 1.4s ease-in-out infinite; }
         @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
@@ -291,7 +370,6 @@ export default function AudioPage() {
           </p>
         </div>
 
-        {/* Upload form — sembunyikan saat ada result */}
         {!hasAnyResult && (
           <>
             <div
@@ -306,8 +384,13 @@ export default function AudioPage() {
               <div className="dz-sub">or <span>browse</span> · MP3, WAV, M4A</div>
               {file && (
                 <div className="file-chip" onClick={(e) => e.stopPropagation()}>
-                  🎵 {file.name}
+                  🎵 {file.name} · {fileSizeMB} MB
                   <button onClick={reset}>×</button>
+                </div>
+              )}
+              {needsCompression && (
+                <div className="compress-badge" onClick={(e) => e.stopPropagation()}>
+                  ⚡ File &gt;25MB — will be compressed automatically before upload
                 </div>
               )}
               <input ref={inputRef} type="file" accept=".mp3,.wav,.m4a,audio/*"
@@ -322,16 +405,17 @@ export default function AudioPage() {
           </>
         )}
 
-        {/* Status bar — tampil saat loading */}
-        {loading && step !== "idle" && (
+        {/* Status bar — termasuk saat compressing */}
+        {(loading || compressing) && step !== "idle" || compressing ? (
           <div className="status-bar">
             <div className="status-spinner" />
-            {stepLabel[step] ?? "Processing…"}
+            {compressing
+              ? "Compressing audio to 16kHz mono WAV…"
+              : stepLabel[step] ?? "Processing…"}
           </div>
-        )}
+        ) : null}
 
-        {/* Wave — hanya saat belum ada result sama sekali */}
-        {loading && !hasAnyResult && (
+        {loading && !hasAnyResult && !compressing && (
           <div className="loading">
             <div className="wave">
               {[...Array(5)].map((_, i) => <span key={i} />)}
@@ -340,11 +424,8 @@ export default function AudioPage() {
           </div>
         )}
 
-        {/* Results — muncul bertahap seiring stream */}
         {hasAnyResult && (
           <div className="results">
-
-            {/* Transcript */}
             {result?.transcript ? (
               <div className="section">
                 <div className="section-header">
@@ -369,7 +450,6 @@ export default function AudioPage() {
               </div>
             ) : null}
 
-            {/* Key Points */}
             {result?.keyPoints?.length ? (
               <div className="section">
                 <div className="section-header">
@@ -397,7 +477,6 @@ export default function AudioPage() {
               </div>
             ) : null}
 
-            {/* Action Items */}
             {result?.actionItems?.length ? (
               <div className="section">
                 <div className="section-header">
@@ -425,7 +504,6 @@ export default function AudioPage() {
               </div>
             ) : null}
 
-            {/* Follow-up Questions */}
             {result?.followUpQuestions?.length ? (
               <div className="section">
                 <div className="section-header">
