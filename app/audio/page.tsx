@@ -9,11 +9,14 @@ type Result = {
   followUpQuestions: string[];
 };
 
+type StreamStep = "idle" | "transcribing" | "analyzing" | "done";
+
 export default function AudioPage() {
   const [file, setFile] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<Result | null>(null);
+  const [step, setStep] = useState<StreamStep>("idle");
+  const [result, setResult] = useState<Partial<Result> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -37,23 +40,110 @@ export default function AudioPage() {
   const handleSubmit = async () => {
     if (!file) return;
     setLoading(true);
+    setStep("idle");
     setError(null);
     setResult(null);
+
     try {
       const form = new FormData();
       form.append("file", file);
+
       const res = await fetch("/api/audio", { method: "POST", body: form });
-      if (!res.ok) throw new Error((await res.json()).error || "Gagal memproses audio.");
-      const data = await res.json();
-      setResult(data);
+
+      if (!res.ok || !res.body) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData?.error || "Gagal memproses audio.");
+      }
+
+      // Baca stream SSE
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        // Proses semua event yang sudah lengkap di buffer
+        const events = buffer.split("\n\n");
+        buffer = events.pop() ?? ""; // Sisakan event yang belum lengkap
+
+        for (const raw of events) {
+          if (!raw.trim()) continue;
+
+          // Parse event name dan data
+          const eventMatch = raw.match(/^event: (\w+)/m);
+          const dataMatch = raw.match(/^data: (.+)/m);
+          if (!eventMatch || !dataMatch) continue;
+
+          const eventName = eventMatch[1];
+          let payload: Record<string, unknown>;
+          try {
+            payload = JSON.parse(dataMatch[1]);
+          } catch {
+            continue;
+          }
+
+          // Dispatch tiap event ke state
+          switch (eventName) {
+            case "status":
+              setStep(payload.step as StreamStep);
+              break;
+
+            case "transcript":
+              setResult((prev) => ({ ...prev, transcript: payload.text as string }));
+              break;
+
+            case "keyPoints":
+              setResult((prev) => ({ ...prev, keyPoints: payload.items as string[] }));
+              break;
+
+            case "actionItems":
+              setResult((prev) => ({ ...prev, actionItems: payload.items as string[] }));
+              break;
+
+            case "followUpQuestions":
+              setResult((prev) => ({ ...prev, followUpQuestions: payload.items as string[] }));
+              break;
+
+            case "done":
+              setStep("done");
+              break;
+
+            case "error":
+              throw new Error(payload.message as string);
+          }
+        }
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Terjadi kesalahan.");
     } finally {
       setLoading(false);
+      setStep("done");
     }
   };
 
-  const reset = () => { setFile(null); setResult(null); setError(null); };
+  const reset = () => {
+    setFile(null);
+    setResult(null);
+    setError(null);
+    setStep("idle");
+  };
+
+  const stepLabel: Record<string, string> = {
+    transcribing: "Mentranskripsi audio via Groq Whisper…",
+    analyzing: "Gemma 4 sedang menganalisis transkrip…",
+    done: "Selesai.",
+  };
+
+  const hasAnyResult = result && (
+    result.transcript ||
+    result.keyPoints?.length ||
+    result.actionItems?.length ||
+    result.followUpQuestions?.length
+  );
 
   return (
     <>
@@ -117,7 +207,16 @@ export default function AudioPage() {
         .btn-primary:hover:not(:disabled) { opacity: 0.88; transform: translateY(-1px); }
         .btn-primary:disabled { opacity: 0.35; cursor: not-allowed; }
 
-        /* Loading */
+        /* Status bar */
+        .status-bar { display: flex; align-items: center; gap: 10px;
+          padding: 12px 16px; background: #0D0F14; border: 1px solid #1E2230;
+          border-radius: 10px; margin-top: 20px; font-size: 13px; color: #6B7285; }
+        .status-spinner { width: 14px; height: 14px; border-radius: 50%;
+          border: 2px solid #1E2230; border-top-color: #00C9A7;
+          animation: spin 0.8s linear infinite; flex-shrink: 0; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Wave (saat transcribing, sebelum result ada) */
         .loading { text-align: center; padding: 48px 0; }
         .wave { display: flex; gap: 6px; justify-content: center; margin-bottom: 20px; }
         .wave span { width: 4px; border-radius: 4px; background: #00C9A7;
@@ -137,19 +236,35 @@ export default function AudioPage() {
         /* Results */
         .results { margin-top: 40px; display: flex; flex-direction: column; gap: 20px; }
 
-        .section { background: #0D0F14; border: 1px solid #1E2230; border-radius: 16px; overflow: hidden; }
+        .section { background: #0D0F14; border: 1px solid #1E2230; border-radius: 16px; overflow: hidden;
+          animation: fadeSlideIn 0.4s ease both; }
+        @keyframes fadeSlideIn {
+          from { opacity: 0; transform: translateY(10px); }
+          to   { opacity: 1; transform: translateY(0); }
+        }
+
         .section-header { padding: 16px 24px; border-bottom: 1px solid #1A1D28;
           display: flex; align-items: center; gap: 10px; }
         .section-icon { font-size: 18px; }
         .section-title { font-family: 'Syne', sans-serif; font-size: 14px; font-weight: 700;
           letter-spacing: 0.04em; text-transform: uppercase; color: #8891A8; }
+
+        /* Skeleton shimmer saat section masih loading */
+        .skeleton { border-radius: 6px; background: linear-gradient(90deg, #1E2230 25%, #262B3D 50%, #1E2230 75%);
+          background-size: 200% 100%; animation: shimmer 1.4s ease-in-out infinite; }
+        @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
+        .skeleton-line { height: 14px; margin-bottom: 10px; border-radius: 4px; }
+        .skeleton-line:last-child { width: 60%; margin-bottom: 0; }
+
         .section-body { padding: 20px 24px; }
 
         .transcript { font-size: 14px; line-height: 1.8; color: #8891A8;
           font-weight: 300; font-style: italic; white-space: pre-wrap; }
 
         .list { list-style: none; display: flex; flex-direction: column; gap: 10px; }
-        .list li { display: flex; gap: 12px; font-size: 14px; line-height: 1.6; color: #A8B0CC; }
+        .list li { display: flex; gap: 12px; font-size: 14px; line-height: 1.6; color: #A8B0CC;
+          animation: fadeIn 0.3s ease both; }
+        @keyframes fadeIn { from{opacity:0;transform:translateX(-4px)} to{opacity:1;transform:none} }
         .list li::before { content: ''; width: 6px; height: 6px; border-radius: 50%;
           background: #00C9A7; flex-shrink: 0; margin-top: 7px; }
 
@@ -176,7 +291,8 @@ export default function AudioPage() {
           </p>
         </div>
 
-        {!result && (
+        {/* Upload form — sembunyikan saat ada result */}
+        {!hasAnyResult && (
           <>
             <div
               className={`dropzone${dragging ? " drag" : ""}${file ? " has-file" : ""}`}
@@ -206,64 +322,140 @@ export default function AudioPage() {
           </>
         )}
 
-        {loading && (
+        {/* Status bar — tampil saat loading */}
+        {loading && step !== "idle" && (
+          <div className="status-bar">
+            <div className="status-spinner" />
+            {stepLabel[step] ?? "Memproses…"}
+          </div>
+        )}
+
+        {/* Wave — hanya saat belum ada result sama sekali */}
+        {loading && !hasAnyResult && (
           <div className="loading">
             <div className="wave">
               {[...Array(5)].map((_, i) => <span key={i} />)}
             </div>
-            <div className="loading-text">Gemma 4 is transcribing your audio…</div>
+            <div className="loading-text">Menunggu transkripsi…</div>
           </div>
         )}
 
-        {result && (
+        {/* Results — muncul bertahap seiring stream */}
+        {hasAnyResult && (
           <div className="results">
-            <div className="section">
-              <div className="section-header">
-                <span className="section-icon">📝</span>
-                <span className="section-title">Transcript</span>
-              </div>
-              <div className="section-body">
-                <p className="transcript">{result.transcript}</p>
-              </div>
-            </div>
 
-            <div className="section">
-              <div className="section-header">
-                <span className="section-icon">💡</span>
-                <span className="section-title">Key Discussion Points</span>
+            {/* Transcript */}
+            {result?.transcript ? (
+              <div className="section">
+                <div className="section-header">
+                  <span className="section-icon">📝</span>
+                  <span className="section-title">Transcript</span>
+                </div>
+                <div className="section-body">
+                  <p className="transcript">{result.transcript}</p>
+                </div>
               </div>
-              <div className="section-body">
-                <ul className="list">
-                  {result.keyPoints.map((p, i) => <li key={i}>{p}</li>)}
-                </ul>
+            ) : loading ? (
+              <div className="section">
+                <div className="section-header">
+                  <span className="section-icon">📝</span>
+                  <span className="section-title">Transcript</span>
+                </div>
+                <div className="section-body">
+                  <div className="skeleton skeleton-line" style={{ width: "90%" }} />
+                  <div className="skeleton skeleton-line" style={{ width: "75%" }} />
+                  <div className="skeleton skeleton-line" />
+                </div>
               </div>
-            </div>
+            ) : null}
 
-            <div className="section">
-              <div className="section-header">
-                <span className="section-icon">✅</span>
-                <span className="section-title">Action Items</span>
+            {/* Key Points */}
+            {result?.keyPoints?.length ? (
+              <div className="section">
+                <div className="section-header">
+                  <span className="section-icon">💡</span>
+                  <span className="section-title">Key Discussion Points</span>
+                </div>
+                <div className="section-body">
+                  <ul className="list">
+                    {result.keyPoints.map((p, i) => (
+                      <li key={i} style={{ animationDelay: `${i * 60}ms` }}>{p}</li>
+                    ))}
+                  </ul>
+                </div>
               </div>
-              <div className="section-body">
-                <ul className="list">
-                  {result.actionItems.map((a, i) => <li key={i}>{a}</li>)}
-                </ul>
+            ) : loading ? (
+              <div className="section">
+                <div className="section-header">
+                  <span className="section-icon">💡</span>
+                  <span className="section-title">Key Discussion Points</span>
+                </div>
+                <div className="section-body">
+                  <div className="skeleton skeleton-line" style={{ width: "80%" }} />
+                  <div className="skeleton skeleton-line" style={{ width: "65%" }} />
+                </div>
               </div>
-            </div>
+            ) : null}
 
-            <div className="section">
-              <div className="section-header">
-                <span className="section-icon">❓</span>
-                <span className="section-title">Follow-up Questions</span>
+            {/* Action Items */}
+            {result?.actionItems?.length ? (
+              <div className="section">
+                <div className="section-header">
+                  <span className="section-icon">✅</span>
+                  <span className="section-title">Action Items</span>
+                </div>
+                <div className="section-body">
+                  <ul className="list">
+                    {result.actionItems.map((a, i) => (
+                      <li key={i} style={{ animationDelay: `${i * 60}ms` }}>{a}</li>
+                    ))}
+                  </ul>
+                </div>
               </div>
-              <div className="section-body">
-                <ul className="list">
-                  {result.followUpQuestions.map((q, i) => <li key={i}>{q}</li>)}
-                </ul>
+            ) : loading ? (
+              <div className="section">
+                <div className="section-header">
+                  <span className="section-icon">✅</span>
+                  <span className="section-title">Action Items</span>
+                </div>
+                <div className="section-body">
+                  <div className="skeleton skeleton-line" style={{ width: "70%" }} />
+                  <div className="skeleton skeleton-line" style={{ width: "55%" }} />
+                </div>
               </div>
-            </div>
+            ) : null}
 
-            <button className="btn-reset" onClick={reset}>← Analyze another recording</button>
+            {/* Follow-up Questions */}
+            {result?.followUpQuestions?.length ? (
+              <div className="section">
+                <div className="section-header">
+                  <span className="section-icon">❓</span>
+                  <span className="section-title">Follow-up Questions</span>
+                </div>
+                <div className="section-body">
+                  <ul className="list">
+                    {result.followUpQuestions.map((q, i) => (
+                      <li key={i} style={{ animationDelay: `${i * 60}ms` }}>{q}</li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            ) : loading ? (
+              <div className="section">
+                <div className="section-header">
+                  <span className="section-icon">❓</span>
+                  <span className="section-title">Follow-up Questions</span>
+                </div>
+                <div className="section-body">
+                  <div className="skeleton skeleton-line" style={{ width: "75%" }} />
+                  <div className="skeleton skeleton-line" style={{ width: "60%" }} />
+                </div>
+              </div>
+            ) : null}
+
+            {step === "done" && !loading && (
+              <button className="btn-reset" onClick={reset}>← Analyze another recording</button>
+            )}
           </div>
         )}
       </div>
