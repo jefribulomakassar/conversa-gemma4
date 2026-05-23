@@ -11,8 +11,95 @@ const BRIEF_TYPES = [
 ];
 
 type Section = { heading: string; content: string };
-
 type StreamStep = "idle" | "reading" | "analyzing" | "parsing" | "done";
+
+const MAX_PDF_SIZE = 20 * 1024 * 1024; // 20MB
+const ACCEPTED_TYPES = ["application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/msword"];
+const ACCEPTED_EXT = /\.(pdf|docx|doc)$/i;
+
+// ── PDF compression via PDF.js + jsPDF ──────────────────────────────────────
+async function compressPDF(file: File): Promise<File> {
+  const pdfjsLib = (window as any).pdfjsLib;
+  const { jsPDF } = (window as any).jspdf;
+
+  if (!pdfjsLib || !jsPDF) throw new Error("PDF libraries not loaded.");
+
+  const arrayBuffer = await file.arrayBuffer();
+  const typedArray = new Uint8Array(arrayBuffer);
+
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+  const pdfDoc = await pdfjsLib.getDocument({ data: typedArray }).promise;
+  const numPages = pdfDoc.numPages;
+
+  // A4 portrait
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  const pageW = 210;
+  const pageH = 297;
+
+  for (let i = 1; i <= numPages; i++) {
+    if (i > 1) doc.addPage();
+    const page = await pdfDoc.getPage(i);
+    const viewport = page.getViewport({ scale: 1.2 }); // turunkan dari default untuk hemat ukuran
+
+    const canvas = document.createElement("canvas");
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    const ctx = canvas.getContext("2d")!;
+
+    await page.render({ canvasContext: ctx, viewport }).promise;
+
+    // Kompres sebagai JPEG quality 0.7
+    const imgData = canvas.toDataURL("image/jpeg", 0.7);
+    doc.addImage(imgData, "JPEG", 0, 0, pageW, pageH);
+  }
+
+  const blob = doc.output("blob");
+  return new File([blob], file.name.replace(/\.[^.]+$/, "_compressed.pdf"), {
+    type: "application/pdf",
+  });
+}
+
+// ── DOCX → PDF via mammoth + jsPDF ──────────────────────────────────────────
+async function convertDocxToPDF(file: File): Promise<File> {
+  const mammoth = (window as any).mammoth;
+  const { jsPDF } = (window as any).jspdf;
+
+  if (!mammoth || !jsPDF) throw new Error("Conversion libraries not loaded.");
+
+  const arrayBuffer = await file.arrayBuffer();
+  const result = await mammoth.extractRawText({ arrayBuffer });
+  const text: string = result.value || "";
+
+  if (!text.trim()) throw new Error("No text could be extracted from the Word document.");
+
+  // Buat PDF dari teks dengan line wrapping
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  const margin = 15;
+  const maxWidth = 210 - margin * 2;
+  const lineHeight = 6;
+  let y = margin;
+
+  doc.setFontSize(11);
+  doc.setFont("helvetica", "normal");
+
+  const lines = doc.splitTextToSize(text, maxWidth) as string[];
+
+  for (const line of lines) {
+    if (y + lineHeight > 297 - margin) {
+      doc.addPage();
+      y = margin;
+    }
+    doc.text(line, margin, y);
+    y += lineHeight;
+  }
+
+  const blob = doc.output("blob");
+  return new File([blob], file.name.replace(/\.[^.]+$/, "_converted.pdf"), {
+    type: "application/pdf",
+  });
+}
 
 export default function DocumentPage() {
   const [file, setFile] = useState<File | null>(null);
@@ -20,23 +107,25 @@ export default function DocumentPage() {
   const [dragging, setDragging] = useState(false);
   const [loading, setLoading] = useState(false);
   const [step, setStep] = useState<StreamStep>("idle");
-
-  // Result state — diisi bertahap saat stream masuk
   const [meta, setMeta] = useState<{ briefType: string; title: string } | null>(null);
   const [sections, setSections] = useState<Section[]>([]);
-
   const [error, setError] = useState<string | null>(null);
+  const [processing, setProcessing] = useState<"compressing" | "converting" | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const hasAnyResult = meta !== null || sections.length > 0;
 
+  const isDocx = (f: File) =>
+    f.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+    f.type === "application/msword" ||
+    /\.(docx|doc)$/i.test(f.name);
+
+  const isPdf = (f: File) =>
+    f.type === "application/pdf" || f.name.endsWith(".pdf");
+
   const handleFile = (f: File) => {
-    if (f.type !== "application/pdf" && !f.name.endsWith(".pdf")) {
-      setError("Format not supported. Use PDF.");
-      return;
-    }
-    if (f.size > 20 * 1024 * 1024) {
-      setError("Maximum file size is 20MB.");
+    if (!isPdf(f) && !isDocx(f)) {
+      setError("Format not supported. Use PDF, DOCX, or DOC.");
       return;
     }
     setError(null);
@@ -60,8 +149,38 @@ export default function DocumentPage() {
     setSections([]);
 
     try {
+      let uploadFile = file;
+
+      // Konversi DOCX → PDF terlebih dahulu
+      if (isDocx(file)) {
+        setProcessing("converting");
+        try {
+          uploadFile = await convertDocxToPDF(file);
+        } catch (e) {
+          throw new Error(e instanceof Error ? e.message : "Failed to convert Word document.");
+        } finally {
+          setProcessing(null);
+        }
+      }
+
+      // Kompres PDF jika masih > 20MB
+      if (uploadFile.size > MAX_PDF_SIZE) {
+        setProcessing("compressing");
+        try {
+          uploadFile = await compressPDF(uploadFile);
+        } catch {
+          throw new Error("Failed to compress PDF. Try a smaller file.");
+        } finally {
+          setProcessing(null);
+        }
+
+        if (uploadFile.size > MAX_PDF_SIZE) {
+          throw new Error("File still too large after compression. Please reduce the number of pages.");
+        }
+      }
+
       const form = new FormData();
-      form.append("file", file);
+      form.append("file", uploadFile);
       form.append("briefType", briefType);
 
       const res = await fetch("/api/document", { method: "POST", body: form });
@@ -71,7 +190,6 @@ export default function DocumentPage() {
         throw new Error(errData?.error || "Failed to process document.");
       }
 
-      // Baca SSE stream
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
@@ -81,7 +199,6 @@ export default function DocumentPage() {
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
-
         const events = buffer.split("\n\n");
         buffer = events.pop() ?? "";
 
@@ -101,30 +218,15 @@ export default function DocumentPage() {
           }
 
           switch (eventName) {
-            case "status":
-              setStep(payload.step as StreamStep);
-              break;
-
+            case "status": setStep(payload.step as StreamStep); break;
             case "meta":
-              setMeta({
-                briefType: payload.briefType as string,
-                title: payload.title as string,
-              });
+              setMeta({ briefType: payload.briefType as string, title: payload.title as string });
               break;
-
             case "section":
-              setSections((prev) => [
-                ...prev,
-                { heading: payload.heading as string, content: payload.content as string },
-              ]);
+              setSections((prev) => [...prev, { heading: payload.heading as string, content: payload.content as string }]);
               break;
-
-            case "done":
-              setStep("done");
-              break;
-
-            case "error":
-              throw new Error(payload.message as string);
+            case "done": setStep("done"); break;
+            case "error": throw new Error(payload.message as string);
           }
         }
       }
@@ -132,6 +234,7 @@ export default function DocumentPage() {
       setError(err instanceof Error ? err.message : "There is an error.");
     } finally {
       setLoading(false);
+      setProcessing(null);
       setStep("done");
     }
   };
@@ -152,15 +255,24 @@ export default function DocumentPage() {
   };
 
   const selectedBrief = BRIEF_TYPES.find((b) => b.id === briefType);
-
-  // Jumlah total section yang diharapkan per brief type
   const EXPECTED_SECTIONS = 5;
-  const pendingSections = loading && meta
-    ? Math.max(0, EXPECTED_SECTIONS - sections.length)
-    : 0;
+  const pendingSections = loading && meta ? Math.max(0, EXPECTED_SECTIONS - sections.length) : 0;
+  const fileSizeMB = file ? (file.size / 1024 / 1024).toFixed(1) : null;
+  const needsCompression = file && isPdf(file) && file.size > MAX_PDF_SIZE;
+  const needsConversion = file && isDocx(file);
+
+  const processingLabel = {
+    compressing: "Compressing PDF pages to reduce file size…",
+    converting: "Converting Word document to PDF…",
+  };
 
   return (
     <>
+      {/* Load PDF.js, jsPDF, mammoth via CDN */}
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" />
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" />
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js" />
+
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap');
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -225,6 +337,11 @@ export default function DocumentPage() {
           color: #4B5470; font-size: 16px; line-height: 1; padding: 0; transition: color 0.2s; }
         .file-chip button:hover { color: #FF6B6B; }
 
+        .info-badge { display: inline-flex; align-items: center; gap: 6px;
+          border-radius: 100px; padding: 5px 12px; font-size: 12px; margin-top: 10px; }
+        .info-badge.compress { background: #1A1400; border: 1px solid #EF9F2733; color: #EF9F27; }
+        .info-badge.convert { background: #0D1420; border: 1px solid #378ADD33; color: #378ADD; }
+
         .btn-primary { width: 100%; margin-top: 20px; padding: 16px;
           background: #F7A84F; color: #07080A; border: none; border-radius: 12px;
           font-family: 'Syne', sans-serif; font-size: 15px; font-weight: 700;
@@ -232,7 +349,6 @@ export default function DocumentPage() {
         .btn-primary:hover:not(:disabled) { opacity: 0.88; transform: translateY(-1px); }
         .btn-primary:disabled { opacity: 0.35; cursor: not-allowed; }
 
-        /* Status bar */
         .status-bar { display: flex; align-items: center; gap: 10px;
           padding: 12px 16px; background: #0D0F14; border: 1px solid #1E2230;
           border-radius: 10px; margin-top: 20px; font-size: 13px; color: #6B7285; }
@@ -241,7 +357,6 @@ export default function DocumentPage() {
           animation: spin 0.8s linear infinite; flex-shrink: 0; }
         @keyframes spin { to { transform: rotate(360deg); } }
 
-        /* Loading anim (sebelum result pertama) */
         .loading { text-align: center; padding: 48px 0; }
         .thinking-anim { display: flex; gap: 4px; justify-content: center; margin-bottom: 20px; }
         .thinking-anim span { width: 8px; height: 8px; border-radius: 50%; background: #F7A84F;
@@ -257,7 +372,6 @@ export default function DocumentPage() {
         .error { background: #1A0E0E; border: 1px solid #FF6B6B33; border-radius: 12px;
           padding: 14px 18px; font-size: 13px; color: #FF8080; margin-top: 16px; }
 
-        /* Results */
         .results { margin-top: 40px; }
         .result-header { margin-bottom: 24px; animation: fadeSlideIn 0.4s ease both; }
         .result-type { display: inline-flex; align-items: center; gap: 8px;
@@ -267,7 +381,6 @@ export default function DocumentPage() {
         .result-title { font-family: 'Syne', sans-serif; font-size: 22px; font-weight: 800;
           color: #F0F2F8; letter-spacing: -0.02em; }
 
-        /* Skeleton title saat meta belum datang */
         .skeleton { background: linear-gradient(90deg, #1E2230 25%, #262B3D 50%, #1E2230 75%);
           background-size: 200% 100%; animation: shimmer 1.4s ease-in-out infinite; border-radius: 6px; }
         @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
@@ -277,17 +390,14 @@ export default function DocumentPage() {
         .skeleton-line:last-child { width: 55%; margin-bottom: 0; }
 
         .sections { display: flex; flex-direction: column; gap: 16px; }
-
         .section { background: #0D0F14; border: 1px solid #1E2230; border-radius: 16px;
           overflow: hidden; animation: fadeSlideIn 0.4s ease both; }
         @keyframes fadeSlideIn {
           from { opacity: 0; transform: translateY(10px); }
           to   { opacity: 1; transform: translateY(0); }
         }
-
         .section-skeleton { background: #0D0F14; border: 1px solid #1E2230;
           border-radius: 16px; overflow: hidden; padding: 14px 22px 18px; }
-
         .section-header { padding: 14px 22px; border-bottom: 1px solid #1A1D28; }
         .section-title { font-family: 'Syne', sans-serif; font-size: 13px; font-weight: 700;
           letter-spacing: 0.05em; text-transform: uppercase; color: #F7A84F; }
@@ -316,11 +426,10 @@ export default function DocumentPage() {
           <div className="tag"><span className="tag-dot" />Document Intelligence</div>
           <h1>Brief Generator</h1>
           <p className="subtitle">
-            Upload a PDF and choose your output type. Gemma 4 processes the full document using its 256K context window — no chunking, no loss.
+            Upload a PDF or Word document and choose your output type. Gemma 4 processes the full document using its 256K context window — no chunking, no loss.
           </p>
         </div>
 
-        {/* Upload form — sembunyikan begitu result mulai masuk */}
         {!hasAnyResult && (
           <>
             <div className="step-label">01 — Choose brief type</div>
@@ -338,7 +447,7 @@ export default function DocumentPage() {
               ))}
             </div>
 
-            <div className="step-label">02 — Upload PDF</div>
+            <div className="step-label">02 — Upload document</div>
             <div
               className={`dropzone${dragging ? " drag" : ""}${file ? " has-file" : ""}`}
               onClick={() => inputRef.current?.click()}
@@ -347,15 +456,25 @@ export default function DocumentPage() {
               onDrop={handleDrop}
             >
               <span className="dz-icon">📄</span>
-              <div className="dz-label">{file ? "File selected" : "Drop your PDF here"}</div>
-              <div className="dz-sub">or <span>browse</span> · PDF only · max 20MB</div>
+              <div className="dz-label">{file ? "File selected" : "Drop your document here"}</div>
+              <div className="dz-sub">or <span>browse</span> · PDF, DOCX, DOC · max 20MB</div>
               {file && (
                 <div className="file-chip" onClick={(e) => e.stopPropagation()}>
-                  📄 {file.name}
+                  📄 {file.name} · {fileSizeMB} MB
                   <button onClick={(e) => { e.stopPropagation(); reset(); }}>×</button>
                 </div>
               )}
-              <input ref={inputRef} type="file" accept=".pdf,application/pdf"
+              {needsCompression && (
+                <div className="info-badge compress" onClick={(e) => e.stopPropagation()}>
+                  ⚡ PDF &gt;20MB — will be compressed automatically
+                </div>
+              )}
+              {needsConversion && (
+                <div className="info-badge convert" onClick={(e) => e.stopPropagation()}>
+                  🔄 Word document — will be converted to PDF automatically
+                </div>
+              )}
+              <input ref={inputRef} type="file" accept=".pdf,.docx,.doc,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword"
                 style={{ display: "none" }} onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])} />
             </div>
 
@@ -367,30 +486,28 @@ export default function DocumentPage() {
           </>
         )}
 
-        {/* Status bar */}
-        {loading && step !== "idle" && (
+        {/* Status bar — termasuk saat processing */}
+        {processing || (loading && step !== "idle") ? (
           <div className="status-bar">
             <div className="status-spinner" />
-            {stepLabel[step] ?? "Processing…"}
+            {processing
+              ? processingLabel[processing]
+              : stepLabel[step] ?? "Processing…"}
           </div>
-        )}
+        ) : null}
 
-        {/* Wave — hanya saat belum ada result sama sekali */}
-        {loading && !hasAnyResult && (
+        {loading && !hasAnyResult && !processing && (
           <div className="loading">
             <div className="thinking-anim">
               <span /><span /><span />
             </div>
             <div className="loading-label">Generating brief…</div>
-            <div className="loading-text">Gemma 4 is processing a document with 256K contexts.</div>
+            <div className="loading-text">Gemma 4 is processing a document with 256K context.</div>
           </div>
         )}
 
-        {/* Results — muncul bertahap */}
         {hasAnyResult && (
           <div className="results">
-
-            {/* Header meta */}
             {meta ? (
               <div className="result-header">
                 <div className="result-type">
@@ -406,7 +523,6 @@ export default function DocumentPage() {
             ) : null}
 
             <div className="sections">
-              {/* Section yang sudah datang */}
               {sections.map((s, i) => (
                 <div className="section" key={i} style={{ animationDelay: `${i * 40}ms` }}>
                   <div className="section-header">
@@ -416,7 +532,6 @@ export default function DocumentPage() {
                 </div>
               ))}
 
-              {/* Skeleton untuk section yang masih loading */}
               {Array.from({ length: pendingSections }).map((_, i) => (
                 <div className="section-skeleton" key={`sk-${i}`}>
                   <div className="skeleton skeleton-line" style={{ width: "40%", marginBottom: "14px" }} />
@@ -433,7 +548,6 @@ export default function DocumentPage() {
           </div>
         )}
 
-        {/* Error di luar form juga (misal error di tengah stream) */}
         {error && hasAnyResult && (
           <div className="error" style={{ marginTop: 16 }}>⚠️ {error}</div>
         )}
