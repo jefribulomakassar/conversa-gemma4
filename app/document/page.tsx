@@ -10,23 +10,25 @@ const BRIEF_TYPES = [
   { id: "sop", label: "SOP Generator", icon: "📋", desc: "Step-by-step procedures and checkpoints" },
 ];
 
-type Result = {
-  briefType: string;
-  title: string;
-  sections: { heading: string; content: string }[];
-  thinking?: string;
-};
+type Section = { heading: string; content: string };
+
+type StreamStep = "idle" | "reading" | "analyzing" | "parsing" | "done";
 
 export default function DocumentPage() {
   const [file, setFile] = useState<File | null>(null);
   const [briefType, setBriefType] = useState<string>("meeting");
-  const [useThinking, setUseThinking] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<Result | null>(null);
+  const [step, setStep] = useState<StreamStep>("idle");
+
+  // Result state — diisi bertahap saat stream masuk
+  const [meta, setMeta] = useState<{ briefType: string; title: string } | null>(null);
+  const [sections, setSections] = useState<Section[]>([]);
+
   const [error, setError] = useState<string | null>(null);
-  const [showThinking, setShowThinking] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  const hasAnyResult = meta !== null || sections.length > 0;
 
   const handleFile = (f: File) => {
     if (f.type !== "application/pdf" && !f.name.endsWith(".pdf")) {
@@ -38,7 +40,8 @@ export default function DocumentPage() {
       return;
     }
     setError(null);
-    setResult(null);
+    setMeta(null);
+    setSections([]);
     setFile(f);
   };
 
@@ -51,27 +54,110 @@ export default function DocumentPage() {
   const handleSubmit = async () => {
     if (!file) return;
     setLoading(true);
+    setStep("idle");
     setError(null);
-    setResult(null);
+    setMeta(null);
+    setSections([]);
+
     try {
       const form = new FormData();
       form.append("file", file);
       form.append("briefType", briefType);
-      form.append("thinking", String(useThinking));
+
       const res = await fetch("/api/document", { method: "POST", body: form });
-      if (!res.ok) throw new Error((await res.json()).error || "Gagal memproses dokumen.");
-      const data = await res.json();
-      setResult(data);
+
+      if (!res.ok || !res.body) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData?.error || "Gagal memproses dokumen.");
+      }
+
+      // Baca SSE stream
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        const events = buffer.split("\n\n");
+        buffer = events.pop() ?? "";
+
+        for (const raw of events) {
+          if (!raw.trim()) continue;
+
+          const eventMatch = raw.match(/^event: (\w+)/m);
+          const dataMatch = raw.match(/^data: (.+)/m);
+          if (!eventMatch || !dataMatch) continue;
+
+          const eventName = eventMatch[1];
+          let payload: Record<string, unknown>;
+          try {
+            payload = JSON.parse(dataMatch[1]);
+          } catch {
+            continue;
+          }
+
+          switch (eventName) {
+            case "status":
+              setStep(payload.step as StreamStep);
+              break;
+
+            case "meta":
+              setMeta({
+                briefType: payload.briefType as string,
+                title: payload.title as string,
+              });
+              break;
+
+            case "section":
+              setSections((prev) => [
+                ...prev,
+                { heading: payload.heading as string, content: payload.content as string },
+              ]);
+              break;
+
+            case "done":
+              setStep("done");
+              break;
+
+            case "error":
+              throw new Error(payload.message as string);
+          }
+        }
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Terjadi kesalahan.");
     } finally {
       setLoading(false);
+      setStep("done");
     }
   };
 
-  const reset = () => { setFile(null); setResult(null); setError(null); setShowThinking(false); };
+  const reset = () => {
+    setFile(null);
+    setMeta(null);
+    setSections([]);
+    setError(null);
+    setStep("idle");
+  };
+
+  const stepLabel: Record<string, string> = {
+    reading: "Membaca dan mengkonversi PDF…",
+    analyzing: "Gemma 4 menganalisis dokumen dengan 256K context…",
+    parsing: "Memproses hasil analisis…",
+    done: "Selesai.",
+  };
 
   const selectedBrief = BRIEF_TYPES.find((b) => b.id === briefType);
+
+  // Jumlah total section yang diharapkan per brief type
+  const EXPECTED_SECTIONS = 5;
+  const pendingSections = loading && meta
+    ? Math.max(0, EXPECTED_SECTIONS - sections.length)
+    : 0;
 
   return (
     <>
@@ -105,12 +191,10 @@ export default function DocumentPage() {
           font-weight: 800; letter-spacing: -0.03em; color: #F0F2F8; line-height: 1.1; }
         .subtitle { margin-top: 10px; font-size: 15px; font-weight: 300; color: #6B7285; line-height: 1.65; }
 
-        /* Step labels */
         .step-label { font-family: 'Syne', sans-serif; font-size: 11px; font-weight: 700;
           letter-spacing: 0.1em; text-transform: uppercase; color: #3B4155;
           margin-bottom: 12px; margin-top: 32px; }
 
-        /* Brief type selector */
         .brief-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
         .brief-card { background: #0D0F14; border: 1px solid #1E2230; border-radius: 12px;
           padding: 14px; cursor: pointer; transition: border-color 0.2s, background 0.2s; text-align: left; }
@@ -122,7 +206,6 @@ export default function DocumentPage() {
         .brief-card-desc { font-size: 11px; color: #4B5470; line-height: 1.5; }
         .brief-card.active .brief-card-label { color: #F7A84F; }
 
-        /* Dropzone */
         .dropzone { border: 1.5px dashed #1E2230; border-radius: 18px; padding: 40px 32px;
           text-align: center; cursor: pointer; transition: border-color 0.2s, background 0.2s;
           background: #0D0F14; }
@@ -142,24 +225,6 @@ export default function DocumentPage() {
           color: #4B5470; font-size: 16px; line-height: 1; padding: 0; transition: color 0.2s; }
         .file-chip button:hover { color: #FF6B6B; }
 
-        /* Thinking toggle */
-        .thinking-row { display: flex; align-items: center; gap: 14px;
-          background: #0D0F14; border: 1px solid #1E2230; border-radius: 12px;
-          padding: 14px 18px; cursor: pointer; transition: border-color 0.2s; }
-        .thinking-row.on { border-color: #F7A84F55; }
-        .thinking-row:hover { border-color: #2E3245; }
-        .thinking-row.on:hover { border-color: #F7A84F88; }
-        .toggle { width: 38px; height: 22px; border-radius: 100px; background: #1A1D28;
-          position: relative; transition: background 0.2s; flex-shrink: 0; }
-        .toggle.on { background: #F7A84F; }
-        .toggle-knob { width: 16px; height: 16px; border-radius: 50%; background: #fff;
-          position: absolute; top: 3px; left: 3px; transition: left 0.2s; }
-        .toggle.on .toggle-knob { left: 19px; }
-        .thinking-info { flex: 1; }
-        .thinking-title { font-family: 'Syne', sans-serif; font-size: 13px; font-weight: 700;
-          color: #C8CCE0; margin-bottom: 2px; }
-        .thinking-desc { font-size: 12px; color: #4B5470; line-height: 1.5; }
-
         .btn-primary { width: 100%; margin-top: 20px; padding: 16px;
           background: #F7A84F; color: #07080A; border: none; border-radius: 12px;
           font-family: 'Syne', sans-serif; font-size: 15px; font-weight: 700;
@@ -167,7 +232,16 @@ export default function DocumentPage() {
         .btn-primary:hover:not(:disabled) { opacity: 0.88; transform: translateY(-1px); }
         .btn-primary:disabled { opacity: 0.35; cursor: not-allowed; }
 
-        /* Loading */
+        /* Status bar */
+        .status-bar { display: flex; align-items: center; gap: 10px;
+          padding: 12px 16px; background: #0D0F14; border: 1px solid #1E2230;
+          border-radius: 10px; margin-top: 20px; font-size: 13px; color: #6B7285; }
+        .status-spinner { width: 14px; height: 14px; border-radius: 50%;
+          border: 2px solid #1E2230; border-top-color: #F7A84F;
+          animation: spin 0.8s linear infinite; flex-shrink: 0; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Loading anim (sebelum result pertama) */
         .loading { text-align: center; padding: 48px 0; }
         .thinking-anim { display: flex; gap: 4px; justify-content: center; margin-bottom: 20px; }
         .thinking-anim span { width: 8px; height: 8px; border-radius: 50%; background: #F7A84F;
@@ -185,7 +259,7 @@ export default function DocumentPage() {
 
         /* Results */
         .results { margin-top: 40px; }
-        .result-header { margin-bottom: 24px; }
+        .result-header { margin-bottom: 24px; animation: fadeSlideIn 0.4s ease both; }
         .result-type { display: inline-flex; align-items: center; gap: 8px;
           background: #F7A84F15; border: 1px solid #F7A84F33; border-radius: 100px;
           padding: 6px 14px; font-size: 12px; font-weight: 600;
@@ -193,25 +267,32 @@ export default function DocumentPage() {
         .result-title { font-family: 'Syne', sans-serif; font-size: 22px; font-weight: 800;
           color: #F0F2F8; letter-spacing: -0.02em; }
 
+        /* Skeleton title saat meta belum datang */
+        .skeleton { background: linear-gradient(90deg, #1E2230 25%, #262B3D 50%, #1E2230 75%);
+          background-size: 200% 100%; animation: shimmer 1.4s ease-in-out infinite; border-radius: 6px; }
+        @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
+        .skeleton-title { height: 28px; width: 60%; margin-bottom: 8px; }
+        .skeleton-badge { height: 20px; width: 120px; border-radius: 100px; margin-bottom: 12px; }
+        .skeleton-line { height: 14px; margin-bottom: 10px; }
+        .skeleton-line:last-child { width: 55%; margin-bottom: 0; }
+
         .sections { display: flex; flex-direction: column; gap: 16px; }
-        .section { background: #0D0F14; border: 1px solid #1E2230; border-radius: 16px; overflow: hidden; }
+
+        .section { background: #0D0F14; border: 1px solid #1E2230; border-radius: 16px;
+          overflow: hidden; animation: fadeSlideIn 0.4s ease both; }
+        @keyframes fadeSlideIn {
+          from { opacity: 0; transform: translateY(10px); }
+          to   { opacity: 1; transform: translateY(0); }
+        }
+
+        .section-skeleton { background: #0D0F14; border: 1px solid #1E2230;
+          border-radius: 16px; overflow: hidden; padding: 14px 22px 18px; }
+
         .section-header { padding: 14px 22px; border-bottom: 1px solid #1A1D28; }
         .section-title { font-family: 'Syne', sans-serif; font-size: 13px; font-weight: 700;
           letter-spacing: 0.05em; text-transform: uppercase; color: #F7A84F; }
         .section-body { padding: 18px 22px; font-size: 14px; line-height: 1.8;
           color: #A8B0CC; font-weight: 300; white-space: pre-wrap; }
-
-        /* Thinking reveal */
-        .thinking-block { background: #0D0F14; border: 1px solid #F7A84F22;
-          border-radius: 16px; overflow: hidden; margin-top: 16px; }
-        .thinking-toggle { width: 100%; padding: 14px 22px; background: none; border: none;
-          cursor: pointer; display: flex; align-items: center; justify-content: space-between;
-          font-family: 'Syne', sans-serif; font-size: 13px; font-weight: 700;
-          color: #F7A84F88; letter-spacing: 0.05em; text-transform: uppercase;
-          transition: color 0.2s; }
-        .thinking-toggle:hover { color: #F7A84F; }
-        .thinking-content { padding: 0 22px 18px; font-size: 13px; line-height: 1.8;
-          color: #4B5470; font-style: italic; white-space: pre-wrap; }
 
         .btn-reset { margin-top: 28px; width: 100%; padding: 13px;
           background: transparent; border: 1px solid #1E2230; border-radius: 12px;
@@ -239,7 +320,8 @@ export default function DocumentPage() {
           </p>
         </div>
 
-        {!result && (
+        {/* Upload form — sembunyikan begitu result mulai masuk */}
+        {!hasAnyResult && (
           <>
             <div className="step-label">01 — Choose brief type</div>
             <div className="brief-grid">
@@ -277,22 +359,6 @@ export default function DocumentPage() {
                 style={{ display: "none" }} onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])} />
             </div>
 
-            <div className="step-label">03 — Options</div>
-            <div
-              className={`thinking-row${useThinking ? " on" : ""}`}
-              onClick={() => setUseThinking(!useThinking)}
-            >
-              <div className={`toggle${useThinking ? " on" : ""}`}>
-                <div className="toggle-knob" />
-              </div>
-              <div className="thinking-info">
-                <div className="thinking-title">🤔 Thinking Mode</div>
-                <div className="thinking-desc">
-                  Activates Gemma 4 deep reasoning (thinkingLevel: HIGH) for complex or ambiguous documents.
-                </div>
-              </div>
-            </div>
-
             {error && <div className="error">⚠️ {error}</div>}
 
             <button className="btn-primary" disabled={!file || loading} onClick={handleSubmit}>
@@ -301,55 +367,75 @@ export default function DocumentPage() {
           </>
         )}
 
-        {loading && (
+        {/* Status bar */}
+        {loading && step !== "idle" && (
+          <div className="status-bar">
+            <div className="status-spinner" />
+            {stepLabel[step] ?? "Memproses…"}
+          </div>
+        )}
+
+        {/* Wave — hanya saat belum ada result sama sekali */}
+        {loading && !hasAnyResult && (
           <div className="loading">
             <div className="thinking-anim">
               <span /><span /><span />
             </div>
-            <div className="loading-label">
-              {useThinking ? "Thinking Mode active…" : "Generating brief…"}
-            </div>
-            <div className="loading-text">
-              {useThinking
-                ? "Gemma 4 is reasoning through your document deeply."
-                : "Gemma 4 is processing your document with 256K context."}
-            </div>
+            <div className="loading-label">Generating brief…</div>
+            <div className="loading-text">Gemma 4 sedang memproses dokumen dengan 256K context.</div>
           </div>
         )}
 
-        {result && (
+        {/* Results — muncul bertahap */}
+        {hasAnyResult && (
           <div className="results">
-            <div className="result-header">
-              <div className="result-type">
-                {selectedBrief?.icon} {result.briefType}
+
+            {/* Header meta */}
+            {meta ? (
+              <div className="result-header">
+                <div className="result-type">
+                  {selectedBrief?.icon} {meta.briefType}
+                </div>
+                <div className="result-title">{meta.title}</div>
               </div>
-              <div className="result-title">{result.title}</div>
-            </div>
+            ) : loading ? (
+              <div className="result-header">
+                <div className="skeleton skeleton-badge" />
+                <div className="skeleton skeleton-title" />
+              </div>
+            ) : null}
 
             <div className="sections">
-              {result.sections.map((s, i) => (
-                <div className="section" key={i}>
+              {/* Section yang sudah datang */}
+              {sections.map((s, i) => (
+                <div className="section" key={i} style={{ animationDelay: `${i * 40}ms` }}>
                   <div className="section-header">
                     <div className="section-title">{s.heading}</div>
                   </div>
                   <div className="section-body">{s.content}</div>
                 </div>
               ))}
+
+              {/* Skeleton untuk section yang masih loading */}
+              {Array.from({ length: pendingSections }).map((_, i) => (
+                <div className="section-skeleton" key={`sk-${i}`}>
+                  <div className="skeleton skeleton-line" style={{ width: "40%", marginBottom: "14px" }} />
+                  <div className="skeleton skeleton-line" style={{ width: "95%" }} />
+                  <div className="skeleton skeleton-line" style={{ width: "85%" }} />
+                  <div className="skeleton skeleton-line" />
+                </div>
+              ))}
             </div>
 
-            {result.thinking && (
-              <div className="thinking-block">
-                <button className="thinking-toggle" onClick={() => setShowThinking(!showThinking)}>
-                  🤔 Thinking trace {showThinking ? "▲" : "▼"}
-                </button>
-                {showThinking && (
-                  <div className="thinking-content">{result.thinking}</div>
-                )}
-              </div>
+            {step === "done" && !loading && (
+              <button className="btn-reset" onClick={reset}>← Generate another brief</button>
             )}
-
-            <button className="btn-reset" onClick={reset}>← Generate another brief</button>
           </div>
+        )}
+
+        {/* Error di luar form juga (misal error di tengah stream) */}
+        {error && hasAnyResult && (
+          <div className="error" style={{ marginTop: 16 }}>⚠️ {error}</div>
         )}
       </div>
     </>
