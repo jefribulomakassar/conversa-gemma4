@@ -11,6 +11,65 @@ type Result = {
   nextSteps?: string[];
 };
 
+const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB — sesuai batas route.ts
+const MAX_DIMENSION = 2048; // px sisi terpanjang
+
+// ── Kompres gambar via Canvas API (tanpa library) ────────────────────────────
+async function compressImage(file: File): Promise<File> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+
+    img.onload = async () => {
+      URL.revokeObjectURL(url);
+
+      // Hitung dimensi baru dengan mempertahankan aspect ratio
+      let { width, height } = img;
+      if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
+        const ratio = Math.min(MAX_DIMENSION / width, MAX_DIMENSION / height);
+        width = Math.round(width * ratio);
+        height = Math.round(height * ratio);
+      }
+
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d")!;
+      ctx.drawImage(img, 0, 0, width, height);
+
+      // Turunkan quality secara iteratif sampai di bawah MAX_IMAGE_SIZE
+      let quality = 0.92;
+      let blob: Blob | null = null;
+
+      while (quality >= 0.5) {
+        blob = await new Promise<Blob | null>((res) =>
+          canvas.toBlob(res, "image/jpeg", quality)
+        );
+        if (!blob || blob.size <= MAX_IMAGE_SIZE) break;
+        quality -= 0.1;
+      }
+
+      if (!blob) {
+        reject(new Error("Failed to compress image."));
+        return;
+      }
+
+      resolve(
+        new File([blob], file.name.replace(/\.[^.]+$/, "_compressed.jpg"), {
+          type: "image/jpeg",
+        })
+      );
+    };
+
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Failed to load image for compression."));
+    };
+
+    img.src = url;
+  });
+}
+
 export default function ImagePage() {
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
@@ -19,6 +78,7 @@ export default function ImagePage() {
   const [step, setStep] = useState<StreamStep>("idle");
   const [result, setResult] = useState<Result>({});
   const [error, setError] = useState<string | null>(null);
+  const [compressing, setCompressing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const hasAnyResult = Object.keys(result).length > 0;
@@ -50,8 +110,25 @@ export default function ImagePage() {
     setResult({});
 
     try {
+      // Kompres jika > 10MB
+      let uploadFile = file;
+      if (file.size > MAX_IMAGE_SIZE) {
+        setCompressing(true);
+        try {
+          uploadFile = await compressImage(file);
+        } catch {
+          throw new Error("Failed to compress image. Try a smaller file.");
+        } finally {
+          setCompressing(false);
+        }
+
+        if (uploadFile.size > MAX_IMAGE_SIZE) {
+          throw new Error("Image still too large after compression. Please use a smaller image.");
+        }
+      }
+
       const form = new FormData();
-      form.append("file", file);
+      form.append("file", uploadFile);
 
       const res = await fetch("/api/image", { method: "POST", body: form });
       if (!res.ok || !res.body) {
@@ -96,17 +173,27 @@ export default function ImagePage() {
       setError(err instanceof Error ? err.message : "There is an error.");
     } finally {
       setLoading(false);
+      setCompressing(false);
       setStep("done");
     }
   };
 
-  const reset = () => { setFile(null); setPreview(null); setResult({}); setError(null); setStep("idle"); };
+  const reset = () => {
+    setFile(null);
+    setPreview(null);
+    setResult({});
+    setError(null);
+    setStep("idle");
+  };
 
   const stepLabel: Record<string, string> = {
     reading: "Reading and converting images…",
     analyzing: "Gemma 4 analyzes the image…",
     parsing: "Processing analysis results…",
   };
+
+  const fileSizeMB = file ? (file.size / 1024 / 1024).toFixed(1) : null;
+  const needsCompression = file && file.size > MAX_IMAGE_SIZE;
 
   return (
     <>
@@ -157,11 +244,19 @@ export default function ImagePage() {
           border-radius: 12px; display: block; }
         .preview-badge { position: absolute; top: 10px; right: 10px;
           background: #07080Acc; border: 1px solid #4F8EF733; border-radius: 100px;
-          padding: 5px 12px; font-size: 12px; color: #4F8EF7; font-weight: 500;
-          backdrop-filter: blur(8px); }
+          padding: 5px 12px; font-size: 12px; color: #4F8EF7; font-weight: 500; }
         .preview-change { margin-top: 12px; font-size: 12px; color: #4B5470; text-align: center; }
         .preview-change span { color: #4F8EF7; cursor: pointer; font-weight: 500; }
         .preview-change span:hover { text-decoration: underline; }
+
+        .file-info { display: flex; align-items: center; justify-content: center;
+          gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+        .size-badge { display: inline-flex; align-items: center; gap: 5px;
+          background: #111420; border: 1px solid #4F8EF733; border-radius: 100px;
+          padding: 4px 12px; font-size: 12px; color: #6B7285; }
+        .compress-badge { display: inline-flex; align-items: center; gap: 5px;
+          background: #1A1400; border: 1px solid #EF9F2733; border-radius: 100px;
+          padding: 4px 12px; font-size: 12px; color: #EF9F27; }
 
         .btn-primary { width: 100%; margin-top: 20px; padding: 16px;
           background: #4F8EF7; color: #07080A; border: none; border-radius: 12px;
@@ -170,7 +265,6 @@ export default function ImagePage() {
         .btn-primary:hover:not(:disabled) { opacity: 0.88; transform: translateY(-1px); }
         .btn-primary:disabled { opacity: 0.35; cursor: not-allowed; }
 
-        /* Status bar */
         .status-bar { display: flex; align-items: center; gap: 10px;
           padding: 12px 16px; background: #0D0F14; border: 1px solid #1E2230;
           border-radius: 10px; margin-top: 20px; font-size: 13px; color: #6B7285; }
@@ -179,7 +273,6 @@ export default function ImagePage() {
           animation: spin 0.8s linear infinite; flex-shrink: 0; }
         @keyframes spin { to { transform: rotate(360deg); } }
 
-        /* Loading (sebelum result pertama) */
         .loading { text-align: center; padding: 48px 0; }
         .scan { width: 56px; height: 56px; border-radius: 12px; background: #0D0F14;
           border: 1px solid #4F8EF733; margin: 0 auto 20px; position: relative; overflow: hidden; }
@@ -194,7 +287,6 @@ export default function ImagePage() {
         .error { background: #1A0E0E; border: 1px solid #FF6B6B33; border-radius: 12px;
           padding: 14px 18px; font-size: 13px; color: #FF8080; margin-top: 16px; }
 
-        /* Results */
         .results { margin-top: 40px; display: flex; flex-direction: column; gap: 20px; }
 
         .section { background: #0D0F14; border: 1px solid #1E2230; border-radius: 16px;
@@ -203,7 +295,6 @@ export default function ImagePage() {
           from { opacity: 0; transform: translateY(10px); }
           to   { opacity: 1; transform: translateY(0); }
         }
-
         .section-skeleton { background: #0D0F14; border: 1px solid #1E2230;
           border-radius: 16px; padding: 16px 24px 20px; }
         .skeleton { background: linear-gradient(90deg, #1E2230 25%, #262B3D 50%, #1E2230 75%);
@@ -253,7 +344,6 @@ export default function ImagePage() {
           </p>
         </div>
 
-        {/* Upload form — sembunyikan begitu result pertama datang */}
         {!hasAnyResult && (
           <>
             <div
@@ -280,6 +370,16 @@ export default function ImagePage() {
                 style={{ display: "none" }} onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])} />
             </div>
 
+            {/* Info ukuran + badge kompresi */}
+            {file && (
+              <div className="file-info">
+                <span className="size-badge">📁 {fileSizeMB} MB</span>
+                {needsCompression && (
+                  <span className="compress-badge">⚡ &gt;10MB — will be compressed automatically</span>
+                )}
+              </div>
+            )}
+
             {file && (
               <p className="preview-change">
                 Wrong file? <span onClick={reset}>Remove and re-upload</span>
@@ -294,16 +394,18 @@ export default function ImagePage() {
           </>
         )}
 
-        {/* Status bar */}
-        {loading && step !== "idle" && (
+        {/* Status bar — termasuk saat compressing */}
+        {compressing || (loading && step !== "idle") ? (
           <div className="status-bar">
             <div className="status-spinner" />
-            {stepLabel[step] ?? "Processing…"}
+            {compressing
+              ? "Compressing image to reduce file size…"
+              : stepLabel[step] ?? "Processing…"}
           </div>
-        )}
+        ) : null}
 
-        {/* Scan animation — hanya sebelum result pertama */}
-        {loading && !hasAnyResult && (
+        {/* Scan animation — hanya sebelum result pertama dan bukan saat compressing */}
+        {loading && !hasAnyResult && !compressing && (
           <div className="loading">
             <div className="scan">
               <div className="scan-line" />
@@ -313,7 +415,6 @@ export default function ImagePage() {
           </div>
         )}
 
-        {/* Results — muncul bertahap */}
         {hasAnyResult && (
           <div className="results">
 
