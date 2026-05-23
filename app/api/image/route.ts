@@ -49,14 +49,14 @@ export async function POST(req: NextRequest) {
         const file = form.get("file") as File | null;
 
         if (!file) { emit("error", { message: "No image file provided." }); controller.close(); return; }
-        if (file.size > 10 * 1024 * 1024) { emit("error", { message: "File terlalu besar. Maksimal 10MB." }); controller.close(); return; }
+        if (file.size > 10 * 1024 * 1024) { emit("error", { message: "The file is too large. Maximum 10MB." }); controller.close(); return; }
         if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
-          emit("error", { message: "Format tidak didukung. Gunakan JPG, PNG, atau WEBP." });
+          emit("error", { message: "Unsupported format. Use JPG, PNG, or WEBP." });
           controller.close(); return;
         }
 
         const apiKey = process.env.OPENROUTER_API_KEY;
-        if (!apiKey) { emit("error", { message: "OPENROUTER_API_KEY tidak ditemukan." }); controller.close(); return; }
+        if (!apiKey) { emit("error", { message: "OPENROUTER_API_KEY not found." }); controller.close(); return; }
 
         // 2. Convert to base64
         emit("status", { step: "reading" });
@@ -116,9 +116,9 @@ Rules:
         if (!response.ok) {
           const errData = await response.json().catch(() => ({}));
           const statusMessages: Record<number, string> = {
-            401: "API key tidak valid. Periksa OPENROUTER_API_KEY Anda.",
-            402: "Kredit OpenRouter habis. Silakan top up akun Anda.",
-            429: "Rate limit tercapai. Coba lagi sebentar.",
+            401: "Invalid API key. Check your OPENROUTER_API_KEY.",
+            402: "OpenRouter credit is depleted. Please top up your account.",
+            429: "Rate limit reached. Please try again shortly.",
           };
           emit("error", { message: statusMessages[response.status] || errData?.error?.message || `OpenRouter error ${response.status}` });
           controller.close(); return;
@@ -130,15 +130,15 @@ Rules:
         const data = await response.json();
         const raw: string | undefined = data?.choices?.[0]?.message?.content;
 
-        if (!raw) { emit("error", { message: "Tidak ada respons dari model." }); controller.close(); return; }
+        if (!raw) { emit("error", { message: "No response from the model." }); controller.close(); return; }
 
         const parsed = extractJSON(raw);
-        if (!parsed) { emit("error", { message: "Model tidak menghasilkan JSON yang valid. Coba lagi." }); controller.close(); return; }
+        if (!parsed) { emit("error", { message: "The model did not produce valid JSON. Please try again." }); controller.close(); return; }
 
         // Normalize
         const requiredFields = ["extractedText", "diagramDescription", "structuredSummary", "nextSteps"];
         for (const field of requiredFields) {
-          if (!(field in parsed)) parsed[field] = field === "nextSteps" ? [] : "Tidak tersedia.";
+          if (!(field in parsed)) parsed[field] = field === "nextSteps" ? [] : "Not available.";
         }
         if (!Array.isArray(parsed.nextSteps)) parsed.nextSteps = [String(parsed.nextSteps)];
 
