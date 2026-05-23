@@ -146,6 +146,12 @@ Rules:
     const raw: string | undefined =
       data?.candidates?.[0]?.content?.parts?.[0]?.text;
 
+    // TAMBAH INI SEMENTARA untuk debug
+    console.log("=== RAW GEMMA RESPONSE ===");
+    console.log(JSON.stringify(data?.candidates?.[0]?.content?.parts, null, 2));
+    console.log("=== RAW TEXT ===");
+    console.log(raw?.slice(0, 500));
+
     if (!raw) {
       console.error(`Empty Gemma response (${usedModel}):`, data);
       return NextResponse.json({ error: "Tidak ada respons dari model." }, { status: 500 });
