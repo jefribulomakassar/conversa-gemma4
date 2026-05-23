@@ -25,7 +25,7 @@ export default function ImagePage() {
 
   const handleFile = (f: File) => {
     if (!["image/jpeg", "image/png", "image/webp"].includes(f.type)) {
-      setError("Format tidak didukung. Gunakan JPG, PNG, atau WEBP.");
+      setError("Unsupported format. Use JPG, PNG, or WEBP.");
       return;
     }
     setError(null);
@@ -56,7 +56,7 @@ export default function ImagePage() {
       const res = await fetch("/api/image", { method: "POST", body: form });
       if (!res.ok || !res.body) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData?.error || "Gagal memproses gambar.");
+        throw new Error(errData?.error || "Failed to process image.");
       }
 
       const reader = res.body.getReader();
@@ -93,7 +93,7 @@ export default function ImagePage() {
         }
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Terjadi kesalahan.");
+      setError(err instanceof Error ? err.message : "There is an error.");
     } finally {
       setLoading(false);
       setStep("done");
@@ -103,9 +103,9 @@ export default function ImagePage() {
   const reset = () => { setFile(null); setPreview(null); setResult({}); setError(null); setStep("idle"); };
 
   const stepLabel: Record<string, string> = {
-    reading: "Membaca dan mengkonversi gambar…",
-    analyzing: "Gemma 4 menganalisis gambar…",
-    parsing: "Memproses hasil analisis…",
+    reading: "Reading and converting images…",
+    analyzing: "Gemma 4 analyzes the image…",
+    parsing: "Processing analysis results…",
   };
 
   return (
@@ -298,7 +298,7 @@ export default function ImagePage() {
         {loading && step !== "idle" && (
           <div className="status-bar">
             <div className="status-spinner" />
-            {stepLabel[step] ?? "Memproses…"}
+            {stepLabel[step] ?? "Processing…"}
           </div>
         )}
 
