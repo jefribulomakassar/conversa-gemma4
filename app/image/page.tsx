@@ -11,7 +11,7 @@ type Result = {
   nextSteps?: string[];
 };
 
-const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB — sesuai batas route.ts
+const MAX_IMAGE_SIZE = 4 * 1024 * 1024; // 10MB — sesuai batas route.ts
 const MAX_DIMENSION = 2048; // px sisi terpanjang
 
 // ── Kompres gambar via Canvas API (tanpa library) ────────────────────────────
@@ -375,7 +375,7 @@ export default function ImagePage() {
               <div className="file-info">
                 <span className="size-badge">📁 {fileSizeMB} MB</span>
                 {needsCompression && (
-                  <span className="compress-badge">⚡ &gt;10MB — will be compressed automatically</span>
+                  <span className="compress-badge">⚡ &gt;4MB — will be compressed automatically</span>
                 )}
               </div>
             )}
