@@ -1,15 +1,13 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 
 // ── Model config ─────────────────────────────────────────────────────────────
 const GOOGLE_AI_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 
-// Gemma 4 = model INTI (wajib hackathon)
 const GEMMA_MODELS = [
   "gemma-4-26b-a4b-it",
   "gemma-4-31b-it",
 ];
 
-// Gemini Flash = model PENDUKUNG (fallback jika Gemma 4 gagal semua retry)
 const FALLBACK_MODEL = "gemini-2.5-flash";
 
 const GROQ_WHISPER_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
@@ -23,10 +21,8 @@ const ALLOWED_AUDIO_TYPES = [
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/** Delay helper */
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Exponential backoff retry untuk Google AI — handle 500 & 503 */
 async function fetchWithRetry(
   url: string,
   body: object,
@@ -41,44 +37,34 @@ async function fetchWithRetry(
       body: JSON.stringify(body),
     });
 
-    // 429 = rate limit → coba model berikutnya (handled di caller)
     if (res.status === 429) return res;
-
-    // 200 = sukses
     if (res.ok) return res;
 
-    // 500 / 503 = transient server error → retry dengan backoff
     if (res.status === 500 || res.status === 503) {
       lastRes = res;
       if (attempt < maxRetries - 1) {
-        // jitter: 1s, 2s, 4s + random 0-1s
         const wait = Math.pow(2, attempt) * 1000 + Math.random() * 1000;
         console.warn(`Gemma ${res.status} on attempt ${attempt + 1}, retry in ${Math.round(wait)}ms`);
         await sleep(wait);
         continue;
       }
-      return res; // kembalikan response terakhir setelah semua retry habis
+      return res;
     }
 
-    // Error lain (400, 403, dll) → langsung kembalikan
     return res;
   }
 
   return lastRes!;
 }
 
-/** Robust JSON extractor — tidak pakai greedy regex */
 function extractJSON(raw: string): Record<string, unknown> | null {
-  // 1. Strip markdown fences
   let text = raw
     .replace(/```json\s*/gi, "")
     .replace(/```\s*/gi, "")
     .trim();
 
-  // 2. Strip karakter kontrol yang bikin JSON.parse crash
   text = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "");
 
-  // 3. Cari { pertama dan } terakhir (bukan greedy)
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
   if (start === -1 || end === -1 || end <= start) return null;
@@ -88,7 +74,6 @@ function extractJSON(raw: string): Record<string, unknown> | null {
   try {
     return JSON.parse(candidate);
   } catch {
-    // 4. Repair: mundur dari } terakhir sampai ketemu JSON valid
     let pos = candidate.lastIndexOf("}");
     while (pos > 0) {
       try {
@@ -103,7 +88,6 @@ function extractJSON(raw: string): Record<string, unknown> | null {
   }
 }
 
-/** Build prompt — PENDEK agar tidak trigger 500 dari sisi input panjang */
 function buildPrompt(transcript: string): string {
   return `Analyze this meeting transcript and return ONLY a JSON object.
 Start with { and end with }. No markdown, no explanation.
@@ -120,7 +104,6 @@ JSON structure required:
 }`;
 }
 
-/** Call Google AI — returns { data, usedModel, isFallback } */
 async function callGoogleAI(
   prompt: string,
   googleKey: string
@@ -130,7 +113,6 @@ async function callGoogleAI(
     maxOutputTokens: 4096,
   };
 
-  // ── 1. Coba semua Gemma 4 model (model INTI) ──────────────────────────────
   for (const model of GEMMA_MODELS) {
     const url = `${GOOGLE_AI_URL}/${model}:generateContent?key=${googleKey}`;
     const body = {
@@ -148,7 +130,6 @@ async function callGoogleAI(
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       console.error(`Gemma error (${model}) ${res.status}:`, err);
-      // Lanjut ke model Gemma berikutnya
       continue;
     }
 
@@ -162,7 +143,6 @@ async function callGoogleAI(
     return { raw, usedModel: model, isFallback: false };
   }
 
-  // ── 2. Semua Gemma 4 gagal → fallback ke Gemini Flash (model PENDUKUNG) ───
   console.warn("All Gemma 4 models failed, falling back to Gemini Flash...");
   const fallbackUrl = `${GOOGLE_AI_URL}/${FALLBACK_MODEL}:generateContent?key=${googleKey}`;
   const fallbackBody = {
@@ -186,96 +166,148 @@ async function callGoogleAI(
   return { raw: fallbackRaw, usedModel: FALLBACK_MODEL, isFallback: true };
 }
 
+// ── Helper: tulis satu event SSE ke encoder ──────────────────────────────────
+function encodeEvent(
+  controller: ReadableStreamDefaultController<Uint8Array>,
+  encoder: TextEncoder,
+  event: string,
+  data: unknown
+) {
+  const line = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  controller.enqueue(encoder.encode(line));
+}
+
 // ── Main handler ─────────────────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
-  try {
-    // 1. Parse form
-    const form = await req.formData();
-    const file = form.get("file") as File | null;
+  const encoder = new TextEncoder();
 
-    if (!file)
-      return NextResponse.json({ error: "No audio file provided." }, { status: 400 });
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const emit = (event: string, data: unknown) =>
+        encodeEvent(controller, encoder, event, data);
 
-    if (file.size > 25 * 1024 * 1024)
-      return NextResponse.json({ error: "File terlalu besar. Maksimal 25MB." }, { status: 400 });
+      try {
+        // 1. Parse form
+        const form = await req.formData();
+        const file = form.get("file") as File | null;
 
-    const mimeType = file.type || "audio/mpeg";
-    if (!ALLOWED_AUDIO_TYPES.includes(mimeType))
-      return NextResponse.json(
-        { error: `Format tidak didukung: ${mimeType}.` },
-        { status: 400 }
-      );
+        if (!file) {
+          emit("error", { message: "No audio file provided." });
+          controller.close();
+          return;
+        }
 
-    const groqKey = process.env.GROQ_API_KEY;
-    if (!groqKey)
-      return NextResponse.json({ error: "GROQ_API_KEY tidak ditemukan." }, { status: 500 });
+        if (file.size > 25 * 1024 * 1024) {
+          emit("error", { message: "File terlalu besar. Maksimal 25MB." });
+          controller.close();
+          return;
+        }
 
-    const googleKey = process.env.GOOGLE_AI_KEY;
-    if (!googleKey)
-      return NextResponse.json({ error: "GOOGLE_AI_KEY tidak ditemukan." }, { status: 500 });
+        const mimeType = file.type || "audio/mpeg";
+        if (!ALLOWED_AUDIO_TYPES.includes(mimeType)) {
+          emit("error", { message: `Format tidak didukung: ${mimeType}.` });
+          controller.close();
+          return;
+        }
 
-    // 2. Transkripsi via Groq Whisper
-    const whisperForm = new FormData();
-    whisperForm.append("file", file);
-    whisperForm.append("model", GROQ_WHISPER_MODEL);
-    whisperForm.append("response_format", "json");
+        const groqKey = process.env.GROQ_API_KEY;
+        if (!groqKey) {
+          emit("error", { message: "GROQ_API_KEY tidak ditemukan." });
+          controller.close();
+          return;
+        }
 
-    const whisperRes = await fetch(GROQ_WHISPER_URL, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${groqKey}` },
-      body: whisperForm,
-    });
+        const googleKey = process.env.GOOGLE_AI_KEY;
+        if (!googleKey) {
+          emit("error", { message: "GOOGLE_AI_KEY tidak ditemukan." });
+          controller.close();
+          return;
+        }
 
-    if (!whisperRes.ok) {
-      const errData = await whisperRes.json().catch(() => ({}));
-      return NextResponse.json(
-        { error: errData?.error?.message || "Gagal mentranskripsi audio." },
-        { status: whisperRes.status }
-      );
-    }
+        // 2. Transkripsi via Groq Whisper
+        emit("status", { step: "transcribing" });
 
-    const whisperData = await whisperRes.json();
-    const transcript: string = whisperData?.text?.trim() ?? "";
+        const whisperForm = new FormData();
+        whisperForm.append("file", file);
+        whisperForm.append("model", GROQ_WHISPER_MODEL);
+        whisperForm.append("response_format", "json");
 
-    if (!transcript)
-      return NextResponse.json(
-        { error: "Transkripsi kosong. Pastikan audio berisi percakapan." },
-        { status: 422 }
-      );
+        const whisperRes = await fetch(GROQ_WHISPER_URL, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${groqKey}` },
+          body: whisperForm,
+        });
 
-    // 3. Analisis via Google AI (Gemma 4 utama, Gemini Flash fallback)
-    const prompt = buildPrompt(transcript);
-    const { raw, usedModel, isFallback } = await callGoogleAI(prompt, googleKey);
+        if (!whisperRes.ok) {
+          const errData = await whisperRes.json().catch(() => ({}));
+          emit("error", { message: errData?.error?.message || "Gagal mentranskripsi audio." });
+          controller.close();
+          return;
+        }
 
-    // 4. Parse JSON
-    const parsed = extractJSON(raw);
+        const whisperData = await whisperRes.json();
+        const transcript: string = whisperData?.text?.trim() ?? "";
 
-    if (!parsed) {
-      console.error(`JSON extraction failed (${usedModel}). Raw:`, raw.slice(0, 500));
-      // Graceful fallback: kembalikan transcript saja
-      return NextResponse.json({
-        transcript,
-        keyPoints: [],
-        actionItems: [],
-        followUpQuestions: [],
-        _meta: { model: usedModel, isFallback, warning: "JSON tidak valid dari model." },
-      });
-    }
+        if (!transcript) {
+          emit("error", { message: "Transkripsi kosong. Pastikan audio berisi percakapan." });
+          controller.close();
+          return;
+        }
 
-    // 5. Normalize
-    if (!parsed.transcript) parsed.transcript = transcript;
-    if (!Array.isArray(parsed.keyPoints)) parsed.keyPoints = [];
-    if (!Array.isArray(parsed.actionItems)) parsed.actionItems = [];
-    if (!Array.isArray(parsed.followUpQuestions)) parsed.followUpQuestions = [];
+        // Stream transcript segera setelah selesai
+        emit("transcript", { text: transcript });
 
-    // Tambah metadata model (berguna untuk debug & presentasi hackathon)
-    parsed._meta = { model: usedModel, isFallback };
+        // 3. Analisis via Google AI
+        emit("status", { step: "analyzing" });
 
-    return NextResponse.json(parsed);
+        const prompt = buildPrompt(transcript);
+        const { raw, usedModel, isFallback } = await callGoogleAI(prompt, googleKey);
 
-  } catch (err) {
-    console.error("Audio route error:", err);
-    const msg = err instanceof Error ? err.message : "Internal server error.";
-    return NextResponse.json({ error: msg }, { status: 500 });
-  }
+        // 4. Parse JSON
+        const parsed = extractJSON(raw);
+
+        const keyPoints: string[] = Array.isArray(parsed?.keyPoints) ? parsed.keyPoints as string[] : [];
+        const actionItems: string[] = Array.isArray(parsed?.actionItems) ? parsed.actionItems as string[] : [];
+        const followUpQuestions: string[] = Array.isArray(parsed?.followUpQuestions) ? parsed.followUpQuestions as string[] : [];
+
+        if (!parsed) {
+          console.error(`JSON extraction failed (${usedModel}). Raw:`, raw.slice(0, 500));
+        }
+
+        // 5. Stream setiap section dengan jeda kecil agar efek streaming terasa di UI
+        emit("keyPoints", { items: keyPoints });
+        await sleep(120);
+
+        emit("actionItems", { items: actionItems });
+        await sleep(120);
+
+        emit("followUpQuestions", { items: followUpQuestions });
+        await sleep(120);
+
+        // 6. Done
+        emit("done", {
+          _meta: {
+            model: usedModel,
+            isFallback,
+            warning: !parsed ? "JSON tidak valid dari model." : undefined,
+          },
+        });
+
+        controller.close();
+      } catch (err) {
+        console.error("Audio route error:", err);
+        const msg = err instanceof Error ? err.message : "Internal server error.";
+        encodeEvent(controller, encoder, "error", { message: msg });
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  });
 }
