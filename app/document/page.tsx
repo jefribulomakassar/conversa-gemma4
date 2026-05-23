@@ -32,11 +32,11 @@ export default function DocumentPage() {
 
   const handleFile = (f: File) => {
     if (f.type !== "application/pdf" && !f.name.endsWith(".pdf")) {
-      setError("Format tidak didukung. Gunakan PDF.");
+      setError("Format not supported. Use PDF.");
       return;
     }
     if (f.size > 20 * 1024 * 1024) {
-      setError("Ukuran file maksimal 20MB.");
+      setError("Maximum file size is 20MB.");
       return;
     }
     setError(null);
@@ -68,7 +68,7 @@ export default function DocumentPage() {
 
       if (!res.ok || !res.body) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData?.error || "Gagal memproses dokumen.");
+        throw new Error(errData?.error || "Failed to process document.");
       }
 
       // Baca SSE stream
@@ -129,7 +129,7 @@ export default function DocumentPage() {
         }
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Terjadi kesalahan.");
+      setError(err instanceof Error ? err.message : "There is an error.");
     } finally {
       setLoading(false);
       setStep("done");
@@ -145,10 +145,10 @@ export default function DocumentPage() {
   };
 
   const stepLabel: Record<string, string> = {
-    reading: "Membaca dan mengkonversi PDF…",
-    analyzing: "Gemma 4 menganalisis dokumen dengan 256K context…",
-    parsing: "Memproses hasil analisis…",
-    done: "Selesai.",
+    reading: "Read and convert PDF…",
+    analyzing: "Gemma 4 analyzes documents with 256K context…",
+    parsing: "Processing analysis results…",
+    done: "Finished.",
   };
 
   const selectedBrief = BRIEF_TYPES.find((b) => b.id === briefType);
@@ -371,7 +371,7 @@ export default function DocumentPage() {
         {loading && step !== "idle" && (
           <div className="status-bar">
             <div className="status-spinner" />
-            {stepLabel[step] ?? "Memproses…"}
+            {stepLabel[step] ?? "Processing…"}
           </div>
         )}
 
@@ -382,7 +382,7 @@ export default function DocumentPage() {
               <span /><span /><span />
             </div>
             <div className="loading-label">Generating brief…</div>
-            <div className="loading-text">Gemma 4 sedang memproses dokumen dengan 256K context.</div>
+            <div className="loading-text">Gemma 4 is processing a document with 256K contexts.</div>
           </div>
         )}
 
