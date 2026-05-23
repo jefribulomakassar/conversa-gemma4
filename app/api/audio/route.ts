@@ -1,13 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 
-// Gemma 4 via Google AI Studio (free, stabil)
 const GOOGLE_AI_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 const GEMMA_MODELS = [
-  "gemma-4-26b-a4b-it",  // MoE, efisien
-  "gemma-4-31b-it",      // fallback dense
+  "gemma-4-26b-a4b-it",
+  "gemma-4-31b-it",
 ];
 
-// Groq Whisper — transkripsi gratis
 const GROQ_WHISPER_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
 const GROQ_WHISPER_MODEL = "whisper-large-v3-turbo";
 
@@ -17,9 +15,48 @@ const ALLOWED_AUDIO_TYPES = [
   "audio/ogg", "audio/webm", "audio/flac", "audio/aac",
 ];
 
+// ── Robust JSON extractor ────────────────────────────────────────────────────
+function extractJSON(raw: string): Record<string, unknown> | null {
+  // 1. Strip markdown fences
+  let text = raw
+    .replace(/```json\s*/gi, "")
+    .replace(/```\s*/gi, "")
+    .trim();
+
+  // 2. Strip control characters kecuali newline & tab
+  text = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "");
+
+  // 3. Cari posisi { pertama dan } terakhir (bukan greedy match)
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start === -1 || end === -1 || end <= start) return null;
+
+  const candidate = text.slice(start, end + 1);
+
+  try {
+    return JSON.parse(candidate);
+  } catch {
+    // 4. Fallback: coba repair JSON — truncate di } terakhir yang valid
+    try {
+      // Cari posisi } valid dari kanan, coba parse bertahap
+      let pos = candidate.lastIndexOf("}");
+      while (pos > 0) {
+        try {
+          const partial = candidate.slice(0, pos + 1);
+          const parsed = JSON.parse(partial);
+          console.warn("JSON repaired by truncation at pos:", pos);
+          return parsed;
+        } catch {
+          pos = candidate.lastIndexOf("}", pos - 1);
+        }
+      }
+    } catch { /* ignore */ }
+    return null;
+  }
+}
+
 export async function POST(req: NextRequest) {
   try {
-    // ── 1. Parse form data ──────────────────────────────────────────────────
     const form = await req.formData();
     const file = form.get("file") as File | null;
 
@@ -44,7 +81,7 @@ export async function POST(req: NextRequest) {
     if (!googleKey)
       return NextResponse.json({ error: "GOOGLE_AI_KEY tidak ditemukan." }, { status: 500 });
 
-    // ── 2. Transkripsi via Groq Whisper (gratis) ────────────────────────────
+    // ── Transkripsi via Groq Whisper ─────────────────────────────────────────
     const whisperForm = new FormData();
     whisperForm.append("file", file);
     whisperForm.append("model", GROQ_WHISPER_MODEL);
@@ -58,7 +95,6 @@ export async function POST(req: NextRequest) {
 
     if (!whisperRes.ok) {
       const errData = await whisperRes.json().catch(() => ({}));
-      console.error("Groq Whisper error:", errData);
       return NextResponse.json(
         { error: errData?.error?.message || "Gagal mentranskripsi audio." },
         { status: whisperRes.status }
@@ -74,30 +110,29 @@ export async function POST(req: NextRequest) {
         { status: 422 }
       );
 
-    // ── 3. Analisis via Gemma 4 — Google AI Studio (fallback antar model) ───
+    // ── Analisis via Gemma 4 ─────────────────────────────────────────────────
     const prompt = `You are an enterprise meeting intelligence assistant.
-Always respond with ONLY a valid JSON object — no markdown, no backticks, no explanation.
+Respond with ONLY a raw JSON object. No markdown, no backticks, no explanation, no preamble.
+Start your response with { and end with }.
 
-Here is the transcript of an audio recording:
-
+Transcript:
 ---
 ${transcript}
 ---
 
-Analyze this transcript and return a valid JSON object with EXACTLY this structure:
+Return this exact JSON structure:
 {
-  "transcript": "The full transcript as provided above",
-  "keyPoints": ["Key point 1", "Key point 2", "Key point 3"],
-  "actionItems": ["Action item with owner 1", "Action item with owner 2"],
-  "followUpQuestions": ["Follow-up question 1", "Follow-up question 2"]
+  "transcript": "full transcript verbatim",
+  "keyPoints": ["point 1", "point 2", "point 3"],
+  "actionItems": ["action with owner 1", "action with owner 2"],
+  "followUpQuestions": ["question 1", "question 2"]
 }
 
 Rules:
-- transcript: copy the full transcript verbatim
 - keyPoints: 3-6 most important discussion points
 - actionItems: concrete tasks with responsible person if mentioned
 - followUpQuestions: 2-4 questions to address after this meeting
-- Return ONLY the JSON object — no preamble, no markdown fences`;
+- Output ONLY the JSON object. First character must be {`;
 
     let analysisRes: Response | null = null;
     let usedModel = "";
@@ -110,13 +145,13 @@ Rules:
         body: JSON.stringify({
           contents: [{ role: "user", parts: [{ text: prompt }] }],
           generationConfig: {
-            temperature: 0.2,
+            temperature: 0.1,       // turunkan dari 0.2 → lebih deterministik
             maxOutputTokens: 4096,
+            stopSequences: [],
           },
         }),
       });
 
-      // 429 = rate limit, coba model berikutnya
       if (res.status === 429) {
         console.warn(`Rate limit on ${model}, trying next...`);
         continue;
@@ -127,59 +162,45 @@ Rules:
       break;
     }
 
-    if (!analysisRes) {
+    if (!analysisRes)
       return NextResponse.json(
         { error: "Semua model Gemma 4 sedang rate limit. Coba lagi dalam 1 menit." },
         { status: 429 }
       );
-    }
 
     if (!analysisRes.ok) {
       const errData = await analysisRes.json().catch(() => ({}));
-      const msg = errData?.error?.message || `Google AI error ${analysisRes.status}`;
-      console.error(`Gemma error (${usedModel}):`, errData);
-      return NextResponse.json({ error: msg }, { status: analysisRes.status });
+      return NextResponse.json(
+        { error: errData?.error?.message || `Google AI error ${analysisRes.status}` },
+        { status: analysisRes.status }
+      );
     }
 
-    // ── 4. Parse response Google AI Studio ─────────────────────────────────
     const data = await analysisRes.json();
     const raw: string | undefined =
       data?.candidates?.[0]?.content?.parts?.[0]?.text;
-
-    // TAMBAH INI SEMENTARA untuk debug
-    console.log("=== RAW GEMMA RESPONSE ===");
-    console.log(JSON.stringify(data?.candidates?.[0]?.content?.parts, null, 2));
-    console.log("=== RAW TEXT ===");
-    console.log(raw?.slice(0, 500));
 
     if (!raw) {
       console.error(`Empty Gemma response (${usedModel}):`, data);
       return NextResponse.json({ error: "Tidak ada respons dari model." }, { status: 500 });
     }
 
-    const clean = raw
-      .replace(/^```json\s*/i, "")
-      .replace(/^```\s*/i, "")
-      .replace(/```\s*$/i, "")
-      .trim();
+    // ── Parse dengan robust extractor ───────────────────────────────────────
+    const parsed = extractJSON(raw);
 
-    const jsonMatch = clean.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      console.error(`No JSON in response (${usedModel}):`, clean.slice(0, 300));
-      return NextResponse.json(
-        { error: "Model tidak menghasilkan JSON valid. Coba lagi." },
-        { status: 500 }
-      );
+    if (!parsed) {
+      console.error(`JSON extraction failed (${usedModel}). Raw (500 chars):`, raw.slice(0, 500));
+      // Fallback: kembalikan transcript saja dengan array kosong
+      return NextResponse.json({
+        transcript,
+        keyPoints: [],
+        actionItems: [],
+        followUpQuestions: [],
+        _warning: "Model tidak menghasilkan JSON valid. Hanya transcript yang tersedia.",
+      });
     }
 
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = JSON.parse(jsonMatch[0]);
-    } catch {
-      return NextResponse.json({ error: "Gagal parse JSON dari model." }, { status: 500 });
-    }
-
-    // ── 5. Normalize fields ─────────────────────────────────────────────────
+    // ── Normalize fields ─────────────────────────────────────────────────────
     if (!parsed.transcript) parsed.transcript = transcript;
     if (!Array.isArray(parsed.keyPoints)) parsed.keyPoints = [];
     if (!Array.isArray(parsed.actionItems)) parsed.actionItems = [];
