@@ -254,9 +254,9 @@ export default function ImagePage() {
         .size-badge { display: inline-flex; align-items: center; gap: 5px;
           background: #111420; border: 1px solid #4F8EF733; border-radius: 100px;
           padding: 4px 12px; font-size: 12px; color: #6B7285; }
-        .compress-badge { display: inline-flex; align-items: center; gap: 5px;
-          background: #1A1400; border: 1px solid #EF9F2733; border-radius: 100px;
-          padding: 4px 12px; font-size: 12px; color: #EF9F27; }
+        // .compress-badge { display: inline-flex; align-items: center; gap: 5px;
+        //   background: #1A1400; border: 1px solid #EF9F2733; border-radius: 100px;
+        //   padding: 4px 12px; font-size: 12px; color: #EF9F27; }
 
         .btn-primary { width: 100%; margin-top: 20px; padding: 16px;
           background: #4F8EF7; color: #07080A; border: none; border-radius: 12px;
@@ -374,9 +374,9 @@ export default function ImagePage() {
             {file && (
               <div className="file-info">
                 <span className="size-badge">📁 {fileSizeMB} MB</span>
-                {needsCompression && (
+                {/*needsCompression && (
                   <span className="compress-badge">⚡ &gt;4MB — will be compressed automatically</span>
-                )}
+                )*/}
               </div>
             )}
 
