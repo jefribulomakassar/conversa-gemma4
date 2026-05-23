@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 // Gemma 4 = model inti hackathon (analisis)
-const ANALYSIS_MODEL = "google/gemma-4-26b-a4b-it";
+const ANALYSIS_MODEL = "google/gemma-4-26b-a4b-it:free";
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
 // Groq Whisper = transkripsi GRATIS
