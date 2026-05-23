@@ -3,6 +3,10 @@ import { NextRequest } from "next/server";
 const MODEL = "google/gemma-4-26b-a4b-it";
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
+// ── Tambahkan ini untuk App Router ──────────────────────────────────────────
+export const runtime = "nodejs";
+export const maxDuration = 60;
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function encodeEvent(
@@ -49,7 +53,7 @@ export async function POST(req: NextRequest) {
         const file = form.get("file") as File | null;
 
         if (!file) { emit("error", { message: "No image file provided." }); controller.close(); return; }
-        if (file.size > 4.5 * 1024 * 1024) { emit("error", { message: "The file is too large. Maximum 10MB." }); controller.close(); return; }
+        if (file.size > 4.5 * 1024 * 1024) { emit("error", { message: "File too large. Maximum 4.5MB." }); controller.close(); return; }
         if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
           emit("error", { message: "Unsupported format. Use JPG, PNG, or WEBP." });
           controller.close(); return;
@@ -173,11 +177,3 @@ Rules:
     },
   });
 }
-
-export const config = {
-  api: {
-    bodyParser: {
-      sizeLimit: '5mb', // sedikit di atas 4.5MB untuk toleransi
-    },
-  },
-};
