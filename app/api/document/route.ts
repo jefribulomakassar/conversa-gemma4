@@ -40,8 +40,6 @@ const BRIEF_PROMPTS: Record<string, string> = {
 - Troubleshooting & Escalation`,
 };
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
 function encodeEvent(
   controller: ReadableStreamDefaultController<Uint8Array>,
   encoder: TextEncoder,
@@ -67,7 +65,6 @@ function extractJSON(raw: string): Record<string, unknown> | null {
   try {
     return JSON.parse(candidate);
   } catch {
-    // Truncation repair
     let pos = candidate.lastIndexOf("}");
     while (pos > 0) {
       try {
@@ -82,8 +79,6 @@ function extractJSON(raw: string): Record<string, unknown> | null {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// ── Main handler ─────────────────────────────────────────────────────────────
-
 export async function POST(req: NextRequest) {
   const encoder = new TextEncoder();
 
@@ -93,25 +88,20 @@ export async function POST(req: NextRequest) {
         encodeEvent(controller, encoder, event, data);
 
       try {
-        // 1. Parse form
         const form = await req.formData();
         const file = form.get("file") as File | null;
         const briefType = (form.get("briefType") as string) || "meeting";
 
         if (!file) {
-          emit("error", { message: "No PDF file provided." });
+          emit("error", { message: "No file provided." });
           controller.close();
           return;
         }
 
+        // Validasi ukuran — kompresi/konversi sudah dilakukan di client
+        // sehingga file yang tiba di sini selalu PDF dan sudah di bawah batas
         if (file.size > 20 * 1024 * 1024) {
-          emit("error", { message: "The file is too large. Maximum 20MB." });
-          controller.close();
-          return;
-        }
-
-        if (file.type !== "application/pdf" && !file.name.endsWith(".pdf")) {
-          emit("error", { message: "Format not supported. Use PDF." });
+          emit("error", { message: "File still too large after compression. Maximum 20MB." });
           controller.close();
           return;
         }
@@ -123,7 +113,6 @@ export async function POST(req: NextRequest) {
           return;
         }
 
-        // 2. Convert PDF → base64
         emit("status", { step: "reading" });
         const arrayBuffer = await file.arrayBuffer();
         const base64 = Buffer.from(arrayBuffer).toString("base64");
@@ -155,7 +144,6 @@ Rules:
 - Write in clear professional English
 - Return ONLY the JSON object — no preamble, no markdown fences`;
 
-        // 3. Call OpenRouter
         emit("status", { step: "analyzing" });
 
         const payload = {
@@ -209,7 +197,6 @@ Rules:
           return;
         }
 
-        // 4. Parse response
         emit("status", { step: "parsing" });
 
         const data = await response.json();
@@ -230,23 +217,19 @@ Rules:
           return;
         }
 
-        // Normalize
         if (!parsed.briefType) parsed.briefType = briefType;
         if (!parsed.title) parsed.title = "Document Brief";
         if (!Array.isArray(parsed.sections)) parsed.sections = [];
 
-        // 5. Stream metadata dulu
         emit("meta", { briefType: parsed.briefType, title: parsed.title });
         await sleep(80);
 
-        // 6. Stream sections satu per satu
         const sections = parsed.sections as { heading: string; content: string }[];
         for (const section of sections) {
           emit("section", { heading: section.heading, content: section.content });
           await sleep(100);
         }
 
-        // 7. Done
         emit("done", {});
         controller.close();
       } catch (err) {
