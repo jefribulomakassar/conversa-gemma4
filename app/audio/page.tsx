@@ -198,7 +198,7 @@ export default function AudioPage() {
 
       trackAudioLevel();
     } catch (err) {
-      setError("Tidak bisa mengakses microphone. Pastikan izin diberikan di browser.");
+      setError("Cannot access microphone. Please allow microphone permission in your browser.");
       console.error(err);
     }
   };
@@ -244,7 +244,7 @@ export default function AudioPage() {
   const handleFile = (f: File) => {
     const allowed = ["audio/mpeg", "audio/wav", "audio/x-wav", "audio/mp4", "audio/m4a", "audio/x-m4a"];
     if (!allowed.includes(f.type) && !f.name.match(/\.(mp3|wav|m4a)$/i)) {
-      setError("Format tidak didukung. Gunakan MP3, WAV, atau M4A.");
+      setError("Unsupported format. Please use MP3, WAV, or M4A.");
       return;
     }
     setError(null);
@@ -272,31 +272,31 @@ export default function AudioPage() {
       let uploadFile: File;
 
       if (inputMode === "record" && recordedBlob) {
-        // Rekaman dari browser (webm/ogg/dll) — selalu convert ke WAV 16kHz
-        // karena Groq Whisper tidak support webm/ogg dari MediaRecorder
+        // Browser recording (webm/ogg/etc) — always convert to WAV 16kHz
+        // because Groq Whisper does not support webm/ogg from MediaRecorder
         setCompressing(true);
         try {
           const rawFile = new File([recordedBlob], "recording.webm", { type: recordedBlob.type });
           uploadFile = await compressAudio(rawFile);
         } catch {
-          throw new Error("Gagal mengkonversi rekaman ke WAV. Coba rekam ulang.");
+          throw new Error("Failed to convert recording to WAV. Please try recording again.");
         } finally {
           setCompressing(false);
         }
       } else {
         uploadFile = file!;
-        // Compress file upload jika > 25MB
+        // Compress uploaded file if > 25MB
         if (uploadFile.size > MAX_SIZE) {
           setCompressing(true);
           try {
             uploadFile = await compressAudio(uploadFile);
           } catch {
-            throw new Error("Gagal mengompres audio. Coba file yang lebih kecil.");
+            throw new Error("Failed to compress audio. Please try a smaller file.");
           } finally {
             setCompressing(false);
           }
           if (uploadFile.size > MAX_SIZE) {
-            throw new Error("File masih terlalu besar setelah kompresi. Persingkat rekaman.");
+            throw new Error("File is still too large after compression. Please shorten the recording.");
           }
         }
       }
@@ -308,7 +308,7 @@ export default function AudioPage() {
 
       if (!res.ok || !res.body) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData?.error || "Gagal memproses audio.");
+        throw new Error(errData?.error || "Failed to process audio.");
       }
 
       const reader = res.body.getReader();
@@ -363,7 +363,7 @@ export default function AudioPage() {
         }
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Terjadi error.");
+      setError(err instanceof Error ? err.message : "An unexpected error occurred.");
     } finally {
       setLoading(false);
       setCompressing(false);
@@ -380,9 +380,9 @@ export default function AudioPage() {
   };
 
   const stepLabel: Record<string, string> = {
-    transcribing: "Mentranskrip audio via Groq Whisper…",
-    analyzing: "Gemma 4 sedang menganalisis transkrip…",
-    done: "Selesai.",
+    transcribing: "Transcribing audio via Groq Whisper…",
+    analyzing: "Gemma 4 is analyzing the transcript…",
+    done: "Done.",
   };
 
   const hasAnyResult = result && (
@@ -597,7 +597,7 @@ export default function AudioPage() {
           <div className="tag"><span className="tag-dot" />Audio Analyzer</div>
           <h1>Meeting Analyzer</h1>
           <p className="subtitle">
-            Rekam langsung dari microphone atau upload file audio — dapatkan transkrip, poin utama, action items, dan follow-up questions secara otomatis.
+            Record directly from your microphone or upload an audio file — get a transcript, key points, action items, and follow-up questions automatically.
           </p>
         </div>
 
@@ -609,7 +609,7 @@ export default function AudioPage() {
                 className={`mode-tab${inputMode === "record" ? " active" : ""}`}
                 onClick={() => { setInputMode("record"); setFile(null); setError(null); }}
               >
-                🎙️ Rekam Suara
+                🎙️ Record Audio
               </button>
               <button
                 className={`mode-tab${inputMode === "upload" ? " active" : ""}`}
@@ -644,43 +644,43 @@ export default function AudioPage() {
                 {/* Timer */}
                 <div className="rec-timer">{formatDuration(recordDuration)}</div>
                 <div className={`rec-status ${recordState}`}>
-                  {recordState === "idle" && "Siap merekam"}
-                  {recordState === "recording" && "● Merekam…"}
-                  {recordState === "paused" && "⏸ Dijeda"}
-                  {recordState === "stopped" && "✓ Rekaman selesai"}
+                  {recordState === "idle" && "Ready to record"}
+                  {recordState === "recording" && "● Recording…"}
+                  {recordState === "paused" && "⏸ Paused"}
+                  {recordState === "stopped" && "✓ Recording complete"}
                 </div>
 
                 {/* Controls */}
                 {recordState === "idle" && (
-                  <button className="mic-btn" onClick={startRecording} title="Mulai rekam">
+                  <button className="mic-btn" onClick={startRecording} title="Start recording">
                     🎙️
                   </button>
                 )}
 
                 {recordState === "recording" && (
                   <div className="rec-controls">
-                    <button className="rec-btn" onClick={pauseRecording}>⏸ Jeda</button>
-                    <button className="rec-btn primary" onClick={stopRecording}>⏹ Stop & Proses</button>
-                    <button className="rec-btn danger" onClick={discardRecording}>🗑 Buang</button>
+                    <button className="rec-btn" onClick={pauseRecording}>⏸ Pause</button>
+                    <button className="rec-btn primary" onClick={stopRecording}>⏹ Stop & Process</button>
+                    <button className="rec-btn danger" onClick={discardRecording}>🗑 Discard</button>
                   </div>
                 )}
 
                 {recordState === "paused" && (
                   <div className="rec-controls">
-                    <button className="rec-btn" onClick={resumeRecording}>▶ Lanjut</button>
-                    <button className="rec-btn primary" onClick={stopRecording}>⏹ Stop & Proses</button>
-                    <button className="rec-btn danger" onClick={discardRecording}>🗑 Buang</button>
+                    <button className="rec-btn" onClick={resumeRecording}>▶ Resume</button>
+                    <button className="rec-btn primary" onClick={stopRecording}>⏹ Stop & Process</button>
+                    <button className="rec-btn danger" onClick={discardRecording}>🗑 Discard</button>
                   </div>
                 )}
 
                 {recordState === "stopped" && recordedUrl && (
                   <>
                     <div className="playback-area">
-                      <div className="playback-label">Preview rekaman</div>
+                      <div className="playback-label">Recording preview</div>
                       <audio src={recordedUrl} controls />
                     </div>
                     <div className="rec-controls" style={{ marginTop: "14px" }}>
-                      <button className="rec-btn danger" onClick={discardRecording}>🗑 Rekam Ulang</button>
+                      <button className="rec-btn danger" onClick={discardRecording}>🗑 Record Again</button>
                     </div>
                   </>
                 )}
@@ -697,8 +697,8 @@ export default function AudioPage() {
                 onDrop={handleDrop}
               >
                 <span className="dz-icon">🎙️</span>
-                <div className="dz-label">{file ? "File dipilih" : "Put the recording here"}</div>
-                <div className="dz-sub">atau <span>browse</span> · MP3, WAV, M4A</div>
+                <div className="dz-label">{file ? "File selected" : "Drop your recording here"}</div>
+                <div className="dz-sub">or <span>browse</span> · MP3, WAV, M4A</div>
                 {file && (
                   <div className="file-chip" onClick={(e) => e.stopPropagation()}>
                     🎵 {file.name} · {fileSizeMB} MB
@@ -707,7 +707,7 @@ export default function AudioPage() {
                 )}
                 {needsCompression && (
                   <div className="compress-badge" onClick={(e) => e.stopPropagation()}>
-                    ⚡ File &gt;25MB — akan dikompres otomatis sebelum upload
+                    ⚡ File &gt;25MB — will be compressed automatically before upload
                   </div>
                 )}
                 <input ref={inputRef} type="file" accept=".mp3,.wav,.m4a,audio/*"
@@ -720,10 +720,10 @@ export default function AudioPage() {
 
             <button className="btn-primary" disabled={!canSubmit} onClick={handleSubmit}>
               {loading
-                ? "Memproses…"
+                ? "Processing…"
                 : inputMode === "record" && recordState === "stopped"
-                ? "Analisis Rekaman →"
-                : "Analisis Recording →"}
+                ? "Analyze Recording →"
+                : "Analyze Recording →"}
             </button>
           </>
         )}
@@ -733,8 +733,8 @@ export default function AudioPage() {
           <div className="status-bar">
             <div className="status-spinner" />
             {compressing
-              ? (inputMode === "record" ? "Mengkonversi rekaman ke WAV 16kHz…" : "Mengompres audio ke 16kHz mono WAV…")
-              : stepLabel[step] ?? "Memproses…"}
+              ? (inputMode === "record" ? "Converting recording to WAV 16kHz…" : "Compressing audio to 16kHz mono WAV…")
+              : stepLabel[step] ?? "Processing…"}
           </div>
         ) : null}
 
@@ -743,7 +743,7 @@ export default function AudioPage() {
             <div className="wave">
               {[...Array(5)].map((_, i) => <span key={i} />)}
             </div>
-            <div className="loading-text">Menunggu transkripsi…</div>
+            <div className="loading-text">Waiting for transcription…</div>
           </div>
         )}
 
@@ -754,7 +754,7 @@ export default function AudioPage() {
               <div className="section">
                 <div className="section-header">
                   <span className="section-icon">📝</span>
-                  <span className="section-title">Transkrip</span>
+                  <span className="section-title">Transcript</span>
                 </div>
                 <div className="section-body">
                   <p className="transcript">{result.transcript}</p>
@@ -762,7 +762,7 @@ export default function AudioPage() {
               </div>
             ) : loading ? (
               <div className="section">
-                <div className="section-header"><span className="section-icon">📝</span><span className="section-title">Transkrip</span></div>
+                <div className="section-header"><span className="section-icon">📝</span><span className="section-title">Transcript</span></div>
                 <div className="section-body">
                   <div className="skeleton skeleton-line" style={{ width: "90%" }} />
                   <div className="skeleton skeleton-line" style={{ width: "75%" }} />
@@ -773,7 +773,7 @@ export default function AudioPage() {
 
             {result?.keyPoints?.length ? (
               <div className="section">
-                <div className="section-header"><span className="section-icon">💡</span><span className="section-title">Poin Utama Diskusi</span></div>
+                <div className="section-header"><span className="section-icon">💡</span><span className="section-title">Key Discussion Points</span></div>
                 <div className="section-body">
                   <ul className="list">
                     {result.keyPoints.map((p, i) => <li key={i} style={{ animationDelay: `${i * 60}ms` }}>{p}</li>)}
@@ -782,7 +782,7 @@ export default function AudioPage() {
               </div>
             ) : loading ? (
               <div className="section">
-                <div className="section-header"><span className="section-icon">💡</span><span className="section-title">Poin Utama Diskusi</span></div>
+                <div className="section-header"><span className="section-icon">💡</span><span className="section-title">Key Discussion Points</span></div>
                 <div className="section-body">
                   <div className="skeleton skeleton-line" style={{ width: "80%" }} />
                   <div className="skeleton skeleton-line" style={{ width: "65%" }} />
@@ -829,7 +829,7 @@ export default function AudioPage() {
             ) : null}
 
             {step === "done" && !loading && (
-              <button className="btn-reset" onClick={reset}>← Analisis rekaman lain</button>
+              <button className="btn-reset" onClick={reset}>← Analyze another recording</button>
             )}
           </div>
         )}
