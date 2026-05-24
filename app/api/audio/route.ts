@@ -202,7 +202,7 @@ export async function POST(req: NextRequest) {
         }
 
         if (file.size > 25 * 1024 * 1024) {
-          emit("error", { message: "The file is too large. Maximum 25MB." });
+          emit("error", { message: "File is too large. Maximum 25MB." });
           controller.close();
           return;
         }
