@@ -109,7 +109,7 @@ export default function ImagePage() {
       }
       setCameraActive(true);
     } catch {
-      setCameraError("Tidak bisa mengakses kamera. Pastikan izin diberikan di browser.");
+      setCameraError("Cannot access camera. Please allow camera permission in your browser.");
       setCameraActive(false);
     }
   }, []);
@@ -149,7 +149,7 @@ export default function ImagePage() {
 
   const handleFile = (f: File) => {
     if (!["image/jpeg", "image/png", "image/webp"].includes(f.type)) {
-      setError("Format tidak didukung. Gunakan JPG, PNG, atau WEBP.");
+      setError("Unsupported format. Use JPG, PNG, or WEBP.");
       return;
     }
     setError(null);
@@ -196,12 +196,12 @@ export default function ImagePage() {
         try {
           uploadFile = await compressImage(uploadFile);
         } catch {
-          throw new Error("Gagal mengompres gambar. Coba gambar yang lebih kecil.");
+          throw new Error("Failed to compress image. Try a smaller file.");
         } finally {
           setCompressing(false);
         }
         if (uploadFile.size > MAX_IMAGE_SIZE) {
-          throw new Error("Gambar masih terlalu besar. Gunakan gambar yang lebih kecil.");
+          throw new Error("Image still too large after compression. Please use a smaller image.");
         }
       }
 
@@ -211,7 +211,7 @@ export default function ImagePage() {
       const fetchRes = await fetch("/api/image", { method: "POST", body: form });
       if (!fetchRes.ok || !fetchRes.body) {
         const errData = await fetchRes.json().catch(() => ({}));
-        throw new Error(errData?.error || "Gagal memproses gambar.");
+        throw new Error(errData?.error || "Failed to process image.");
       }
 
       const reader = fetchRes.body.getReader();
@@ -247,7 +247,7 @@ export default function ImagePage() {
         }
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Terjadi error.");
+      setError(err instanceof Error ? err.message : "An error occurred.");
     } finally {
       setLoading(false);
       setCompressing(false);
@@ -266,9 +266,9 @@ export default function ImagePage() {
   };
 
   const stepLabel: Record<string, string> = {
-    reading: "Membaca dan mengonversi gambar…",
-    analyzing: "Gemma 4 menganalisis gambar…",
-    parsing: "Memproses hasil analisis…",
+    reading: "Reading and converting image…",
+    analyzing: "Gemma 4 is analyzing the image…",
+    parsing: "Processing analysis results…",
   };
 
   const fileSizeMB = file ? (file.size / 1024 / 1024).toFixed(1) : null;
@@ -477,7 +477,7 @@ export default function ImagePage() {
           <div className="tag"><span className="tag-dot" />Image Intelligence</div>
           <h1>Whiteboard Analyzer</h1>
           <p className="subtitle">
-            Upload foto atau ambil langsung dari kamera. Gemma 4 membaca dan menginterpretasi visual, lalu menghasilkan ringkasan terstruktur dan langkah selanjutnya.
+            Upload a photo or capture directly from your camera. Gemma 4 reads and interprets the visual, then generates a structured summary and next steps.
           </p>
         </div>
 
@@ -494,7 +494,7 @@ export default function ImagePage() {
                   setError(null);
                 }}
               >
-                📷 Ambil dari Kamera
+                📷 Use Camera
               </button>
               <button
                 className={`mode-tab${inputMode === "upload" ? " active" : ""}`}
@@ -505,7 +505,7 @@ export default function ImagePage() {
                   setError(null);
                 }}
               >
-                📁 Upload Gambar
+                📁 Upload Image
               </button>
             </div>
 
@@ -518,8 +518,8 @@ export default function ImagePage() {
                   {!cameraActive && !capturedImage && (
                     <div className="camera-idle-placeholder">
                       <span className="cam-icon">📷</span>
-                      <div className="cam-idle-label">Kamera belum aktif</div>
-                      <div className="cam-idle-sub">Tekan tombol di bawah untuk mulai</div>
+                      <div className="cam-idle-label">Camera not active</div>
+                      <div className="cam-idle-sub">Press the button below to start</div>
                     </div>
                   )}
 
@@ -528,7 +528,7 @@ export default function ImagePage() {
                     <>
                       <video ref={videoRef} className="camera-video" muted playsInline />
                       <div className="cam-badge">
-                        {facingMode === "environment" ? "📸 Kamera Belakang" : "🤳 Kamera Depan"}
+                        {facingMode === "environment" ? "📸 Back Camera" : "🤳 Front Camera"}
                       </div>
                       <div className="cam-overlay">
                         <button className="cam-flip-btn" onClick={flipCamera} title="Ganti kamera">🔄</button>
@@ -544,8 +544,8 @@ export default function ImagePage() {
                   {capturedImage && !cameraActive && (
                     <>
                       {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img src={capturedImage} alt="Hasil foto" className="camera-captured-img" />
-                      <div className="preview-badge">✓ Foto diambil</div>
+                      <img src={capturedImage} alt="Captured photo" className="camera-captured-img" />
+                      <div className="preview-badge">✓ Photo captured</div>
                     </>
                   )}
                 </div>
@@ -554,17 +554,17 @@ export default function ImagePage() {
                 <div className="camera-footer">
                   {!cameraActive && !capturedImage && (
                     <button className="cam-btn primary" onClick={openCamera}>
-                      📷 Aktifkan Kamera
+                      📷 Open Camera
                     </button>
                   )}
                   {cameraActive && (
                     <button className="cam-btn danger" onClick={stopCamera}>
-                      ✕ Tutup Kamera
+                      ✕ Close Camera
                     </button>
                   )}
                   {capturedImage && !cameraActive && (
                     <>
-                      <button className="cam-btn danger" onClick={discardCapture}>🔄 Foto Ulang</button>
+                      <button className="cam-btn danger" onClick={discardCapture}>🔄 Retake</button>
                     </>
                   )}
                 </div>
@@ -584,7 +584,7 @@ export default function ImagePage() {
                   {!file ? (
                     <>
                       <span className="dz-icon">🖼️</span>
-                      <div className="dz-label">Letakkan gambar di sini</div>
+                      <div className="dz-label">Drop your image here</div>
                       <div className="dz-sub">atau <span>browse</span> · JPG, PNG, WEBP</div>
                     </>
                   ) : (
@@ -606,7 +606,7 @@ export default function ImagePage() {
                 )}
                 {file && (
                   <p className="preview-change">
-                    File salah? <span onClick={reset}>Hapus dan upload ulang</span>
+                    Wrong file? <span onClick={reset}>Remove and re-upload</span>
                   </p>
                 )}
               </>
@@ -618,10 +618,10 @@ export default function ImagePage() {
 
             <button className="btn-primary" disabled={!canSubmit} onClick={handleSubmit}>
               {loading
-                ? "Memproses…"
+                ? "Processing…"
                 : inputMode === "camera" && capturedImage
-                ? "Analisis Foto →"
-                : "Analisis Gambar →"}
+                ? "Analyze Photo →"
+                : "Analyze Image →"}
             </button>
           </>
         )}
@@ -631,8 +631,8 @@ export default function ImagePage() {
           <div className="status-bar">
             <div className="status-spinner" />
             {compressing
-              ? "Mengompres gambar…"
-              : stepLabel[step] ?? "Memproses…"}
+              ? "Compressing image…"
+              : stepLabel[step] ?? "Processing…"}
           </div>
         ) : null}
 
@@ -643,7 +643,7 @@ export default function ImagePage() {
               <div className="scan-line" />
               <div className="scan-icon">🖼️</div>
             </div>
-            <div className="loading-text">Gemma 4 sedang membaca gambar…</div>
+            <div className="loading-text">Gemma 4 is reading your image…</div>
           </div>
         )}
 
@@ -652,7 +652,7 @@ export default function ImagePage() {
           <div className="results">
             {result.extractedText ? (
               <div className="section">
-                <div className="section-header"><span className="section-icon">🔤</span><span className="section-title">Teks yang Diekstrak</span></div>
+                <div className="section-header"><span className="section-icon">🔤</span><span className="section-title">Extracted Text</span></div>
                 <div className="section-body"><p className="text-block">{result.extractedText}</p></div>
               </div>
             ) : loading ? (
@@ -666,7 +666,7 @@ export default function ImagePage() {
 
             {result.diagramDescription ? (
               <div className="section">
-                <div className="section-header"><span className="section-icon">📐</span><span className="section-title">Diagram & Elemen Visual</span></div>
+                <div className="section-header"><span className="section-icon">📐</span><span className="section-title">Diagrams & Visual Elements</span></div>
                 <div className="section-body"><p className="text-block">{result.diagramDescription}</p></div>
               </div>
             ) : loading ? (
@@ -679,7 +679,7 @@ export default function ImagePage() {
 
             {result.structuredSummary ? (
               <div className="section">
-                <div className="section-header"><span className="section-icon">📋</span><span className="section-title">Ringkasan Terstruktur</span></div>
+                <div className="section-header"><span className="section-icon">📋</span><span className="section-title">Structured Summary</span></div>
                 <div className="section-body"><p className="summary-block">{result.structuredSummary}</p></div>
               </div>
             ) : loading ? (
@@ -693,7 +693,7 @@ export default function ImagePage() {
 
             {result.nextSteps?.length ? (
               <div className="section">
-                <div className="section-header"><span className="section-icon">🚀</span><span className="section-title">Langkah Selanjutnya</span></div>
+                <div className="section-header"><span className="section-icon">🚀</span><span className="section-title">Suggested Next Steps</span></div>
                 <div className="section-body">
                   <ul className="list">
                     {result.nextSteps.map((s, i) => (
@@ -711,7 +711,7 @@ export default function ImagePage() {
             ) : null}
 
             {step === "done" && !loading && (
-              <button className="btn-reset" onClick={reset}>← Analisis gambar lain</button>
+              <button className="btn-reset" onClick={reset}>← Analyze another image</button>
             )}
             {error && <div className="error">⚠️ {error}</div>}
           </div>
