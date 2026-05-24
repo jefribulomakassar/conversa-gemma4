@@ -272,25 +272,32 @@ export default function AudioPage() {
       let uploadFile: File;
 
       if (inputMode === "record" && recordedBlob) {
-        // Convert blob to File
-        const ext = recordedBlob.type.includes("ogg") ? "ogg" : recordedBlob.type.includes("wav") ? "wav" : "webm";
-        uploadFile = new File([recordedBlob], `recording.${ext}`, { type: recordedBlob.type });
-      } else {
-        uploadFile = file!;
-      }
-
-      // Compress if > 25MB
-      if (uploadFile.size > MAX_SIZE) {
+        // Rekaman dari browser (webm/ogg/dll) — selalu convert ke WAV 16kHz
+        // karena Groq Whisper tidak support webm/ogg dari MediaRecorder
         setCompressing(true);
         try {
-          uploadFile = await compressAudio(uploadFile);
+          const rawFile = new File([recordedBlob], "recording.webm", { type: recordedBlob.type });
+          uploadFile = await compressAudio(rawFile);
         } catch {
-          throw new Error("Gagal mengompres audio. Coba file yang lebih kecil.");
+          throw new Error("Gagal mengkonversi rekaman ke WAV. Coba rekam ulang.");
         } finally {
           setCompressing(false);
         }
+      } else {
+        uploadFile = file!;
+        // Compress file upload jika > 25MB
         if (uploadFile.size > MAX_SIZE) {
-          throw new Error("File masih terlalu besar setelah kompresi. Persingkat rekaman.");
+          setCompressing(true);
+          try {
+            uploadFile = await compressAudio(uploadFile);
+          } catch {
+            throw new Error("Gagal mengompres audio. Coba file yang lebih kecil.");
+          } finally {
+            setCompressing(false);
+          }
+          if (uploadFile.size > MAX_SIZE) {
+            throw new Error("File masih terlalu besar setelah kompresi. Persingkat rekaman.");
+          }
         }
       }
 
@@ -726,7 +733,7 @@ export default function AudioPage() {
           <div className="status-bar">
             <div className="status-spinner" />
             {compressing
-              ? "Mengompres audio ke 16kHz mono WAV…"
+              ? (inputMode === "record" ? "Mengkonversi rekaman ke WAV 16kHz…" : "Mengompres audio ke 16kHz mono WAV…")
               : stepLabel[step] ?? "Memproses…"}
           </div>
         ) : null}
