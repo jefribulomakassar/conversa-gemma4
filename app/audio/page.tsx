@@ -697,7 +697,7 @@ export default function AudioPage() {
                 onDrop={handleDrop}
               >
                 <span className="dz-icon">🎙️</span>
-                <div className="dz-label">{file ? "File dipilih" : "Letakkan rekaman di sini"}</div>
+                <div className="dz-label">{file ? "File dipilih" : "Put the recording here"}</div>
                 <div className="dz-sub">atau <span>browse</span> · MP3, WAV, M4A</div>
                 {file && (
                   <div className="file-chip" onClick={(e) => e.stopPropagation()}>
