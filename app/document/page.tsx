@@ -131,7 +131,7 @@ export default function DocumentPage() {
   const isPdf  = (f: File) => f.type === "application/pdf" || f.name.endsWith(".pdf");
 
   const handleFile = (f: File) => {
-    if (!isPdf(f) && !isDocx(f)) { setError("Format tidak didukung. Gunakan PDF, DOCX, atau DOC."); return; }
+    if (!isPdf(f) && !isDocx(f)) { setError("Format not supported. Use PDF, DOCX, or DOC."); return; }
     setError(null); setMeta(null); setSections([]); setToolEvents([]); setFile(f);
   };
 
@@ -163,15 +163,15 @@ export default function DocumentPage() {
       if (isDocx(file)) {
         setProcessing("converting");
         try { uploadFile = await convertDocxToPDF(file); }
-        catch (e) { throw new Error(e instanceof Error ? e.message : "Gagal konversi Word."); }
+        catch (e) { throw new Error(e instanceof Error ? e.message : "Word conversion failed."); }
         finally { setProcessing(null); }
       }
       if (uploadFile.size > MAX_PDF_SIZE) {
         setProcessing("compressing");
         try { uploadFile = await compressPDF(uploadFile); }
-        catch { throw new Error("Gagal kompres PDF. Coba file lebih kecil."); }
+        catch { throw new Error("Failed to compress PDF. Try a smaller file."); }
         finally { setProcessing(null); }
-        if (uploadFile.size > MAX_PDF_SIZE) throw new Error("File masih terlalu besar setelah kompresi.");
+        if (uploadFile.size > MAX_PDF_SIZE) throw new Error("The file is still too large after compression.");
       }
 
       const form = new FormData();
@@ -181,7 +181,7 @@ export default function DocumentPage() {
       const res = await fetch("/api/document", { method: "POST", body: form });
       if (!res.ok || !res.body) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData?.error || "Gagal memproses dokumen.");
+        throw new Error(errData?.error || "Failed to process document.");
       }
 
       const reader  = res.body.getReader();
@@ -264,7 +264,7 @@ export default function DocumentPage() {
         }
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Terjadi kesalahan.");
+      setError(err instanceof Error ? err.message : "There is an error.");
     } finally {
       setLoading(false);
       setProcessing(null);
