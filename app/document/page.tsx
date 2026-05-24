@@ -256,6 +256,7 @@ export default function DocumentPage() {
             case "done":
               setStep("done");
               setAgentThinking("");
+              setLoading(false);
               break;
 
             case "error":
