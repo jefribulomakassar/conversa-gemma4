@@ -1,349 +1,280 @@
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
-export const runtime = "nodejs";
-export const maxDuration = 60;
+// ── Types ────────────────────────────────────────────────────────────────────
+type ClassificationType =
+  | "whiteboard"
+  | "diagram"
+  | "screenshot"
+  | "document"
+  | "chart"
+  | "photo";
 
-const MODEL = "google/gemma-4-26b-a4b-it";
-const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-
-// ── Image type configs — output fields adapt per type ────────────────────────
-const IMAGE_TYPE_CONFIGS: Record<string, {
+interface ClassificationResult {
+  type: ClassificationType;
   label: string;
   icon: string;
-  fields: { key: string; heading: string; icon: string; instruction: string }[];
-}> = {
-  whiteboard: {
-    label: "Whiteboard / Blackboard",
-    icon: "🖊️",
-    fields: [
-      { key: "extractedText",      heading: "Extracted Text",           icon: "🔤", instruction: "Transcribe ALL text visible, preserve bullets/lists/columns." },
-      { key: "diagramDescription", heading: "Diagrams & Visual Flow",   icon: "📐", instruction: "Describe all drawn shapes, arrows, boxes, connections and their meaning." },
-      { key: "structuredSummary",  heading: "Structured Summary",       icon: "📋", instruction: "Synthesize the full whiteboard content into 3-5 clear sentences." },
-      { key: "nextSteps",          heading: "Suggested Next Steps",     icon: "🚀", instruction: "Provide 3-5 concrete actionable steps based on what's written.", isList: true },
-    ],
-  },
-  diagram: {
-    label: "Diagram / Flowchart / Architecture",
-    icon: "🗂️",
-    fields: [
-      { key: "diagramType",        heading: "Diagram Type & Purpose",   icon: "🗂️", instruction: "Identify the type of diagram (flowchart, ERD, architecture, etc.) and its purpose." },
-      { key: "componentsAndFlow",  heading: "Components & Flow",        icon: "🔗", instruction: "List all components, nodes, entities and describe how they connect or flow." },
-      { key: "extractedText",      heading: "Labels & Text",            icon: "🔤", instruction: "Extract all labels, annotations, and text visible in the diagram." },
-      { key: "structuredSummary",  heading: "What This Diagram Shows",  icon: "📋", instruction: "Explain in plain language what this diagram represents overall." },
-      { key: "nextSteps",          heading: "Observations & Recommendations", icon: "💡", instruction: "Provide 3-4 observations or improvement suggestions for this diagram.", isList: true },
-    ],
-  },
-  screenshot: {
-    label: "Screenshot / UI / App",
-    icon: "🖥️",
-    fields: [
-      { key: "uiDescription",      heading: "UI Description",           icon: "🖥️", instruction: "Describe what application/website this is and what the screen shows." },
-      { key: "extractedText",      heading: "Visible Text & Data",      icon: "🔤", instruction: "Extract all visible text, labels, values, and data on screen." },
-      { key: "userFlowContext",    heading: "User Flow & Context",      icon: "🔄", instruction: "Explain what the user is doing or what state the app is in." },
-      { key: "nextSteps",          heading: "Issues & Recommendations", icon: "🚀", instruction: "List any visible errors, UX issues, or suggested improvements.", isList: true },
-    ],
-  },
-  document: {
-    label: "Document / Form / Report",
-    icon: "📄",
-    fields: [
-      { key: "documentType",       heading: "Document Type",            icon: "📄", instruction: "Identify what kind of document this is (invoice, form, report, letter, etc.)." },
-      { key: "extractedText",      heading: "Full Text Content",        icon: "🔤", instruction: "Transcribe all text content as completely as possible." },
-      { key: "keyInformation",     heading: "Key Information",          icon: "🗝️", instruction: "Extract the most important facts, figures, dates, names, or values." },
-      { key: "structuredSummary",  heading: "Document Summary",         icon: "📋", instruction: "Summarize what this document is about and its purpose in 2-3 sentences." },
-    ],
-  },
-  photo: {
-    label: "Photo / Real-world Scene",
-    icon: "📷",
-    fields: [
-      { key: "sceneDescription",   heading: "Scene Description",        icon: "🌄", instruction: "Describe what is visible in this photo: people, objects, setting, context." },
-      { key: "extractedText",      heading: "Text in Photo",            icon: "🔤", instruction: "Extract any text visible in the image (signs, labels, writing). Write 'No text detected.' if none." },
-      { key: "structuredSummary",  heading: "Key Observations",         icon: "📋", instruction: "Summarize the most significant or relevant aspects of this image." },
-      { key: "nextSteps",          heading: "Actionable Insights",      icon: "💡", instruction: "Provide 2-3 insights or actions relevant to this image.", isList: true },
-    ],
-  },
-  chart: {
-    label: "Chart / Graph / Data Visualization",
-    icon: "📊",
-    fields: [
-      { key: "chartType",          heading: "Chart Type & Data",        icon: "📊", instruction: "Identify the chart type (bar, line, pie, etc.) and what data it shows." },
-      { key: "extractedText",      heading: "Labels, Axes & Values",    icon: "🔤", instruction: "Extract all axis labels, legend entries, data point values, and title." },
-      { key: "dataInsights",       heading: "Key Data Insights",        icon: "🔍", instruction: "Identify the most significant trends, peaks, drops, or patterns in the data." },
-      { key: "structuredSummary",  heading: "Data Summary",             icon: "📋", instruction: "Summarize what story this chart tells in 2-3 sentences." },
-      { key: "nextSteps",          heading: "Recommended Actions",      icon: "🚀", instruction: "Based on the data, suggest 2-4 actions or further analyses.", isList: true },
-    ],
-  },
-};
+  reasoning: string;
+  confidence: number;
+}
+
+interface FieldResult {
+  key: string;
+  heading: string;
+  icon: string;
+  isList: boolean;
+  value: string | string[];
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-function encodeEvent(
-  controller: ReadableStreamDefaultController<Uint8Array>,
-  encoder: TextEncoder,
+function sseEvent(
+  controller: ReadableStreamDefaultController,
   event: string,
-  data: unknown
+  payload: Record<string, unknown>
 ) {
-  controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+  const chunk = `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
+  controller.enqueue(new TextEncoder().encode(chunk));
 }
 
-function extractJSON(raw: string): Record<string, unknown> | null {
-  const clean = raw.replace(/```json\s*/gi, "").replace(/```\s*/gi, "").trim();
-  const start = clean.indexOf("{");
-  const end = clean.lastIndexOf("}");
-  if (start === -1 || end === -1 || end <= start) return null;
-  const candidate = clean.slice(start, end + 1);
-  try {
-    return JSON.parse(candidate);
-  } catch {
-    let pos = candidate.lastIndexOf("}");
-    while (pos > 0) {
-      try { return JSON.parse(candidate.slice(0, pos + 1)); } catch { pos = candidate.lastIndexOf("}", pos - 1); }
-    }
-    return null;
-  }
+// ── Field definitions per image type ─────────────────────────────────────────
+const TYPE_FIELDS: Record<
+  ClassificationType,
+  { key: string; heading: string; icon: string; isList: boolean }[]
+> = {
+  whiteboard: [
+    { key: "extractedText",      heading: "Extracted Text",      icon: "📝", isList: false },
+    { key: "diagramDescription", heading: "Diagrams & Structure", icon: "🔷", isList: false },
+    { key: "structuredSummary",  heading: "Summary",             icon: "📋", isList: false },
+    { key: "nextSteps",          heading: "Next Steps",          icon: "🚀", isList: true  },
+  ],
+  diagram: [
+    { key: "diagramType",        heading: "Diagram Type",        icon: "📊", isList: false },
+    { key: "components",         heading: "Key Components",      icon: "🔷", isList: true  },
+    { key: "flowDescription",    heading: "Flow / Logic",        icon: "➡️", isList: false },
+    { key: "summary",            heading: "Summary",             icon: "📋", isList: false },
+  ],
+  screenshot: [
+    { key: "appOrPage",          heading: "App / Page",          icon: "🖥️", isList: false },
+    { key: "uiElements",         heading: "UI Elements",         icon: "🧩", isList: true  },
+    { key: "visibleText",        heading: "Visible Text",        icon: "📝", isList: false },
+    { key: "summary",            heading: "Summary",             icon: "📋", isList: false },
+  ],
+  document: [
+    { key: "documentType",       heading: "Document Type",       icon: "📄", isList: false },
+    { key: "extractedText",      heading: "Extracted Text",      icon: "📝", isList: false },
+    { key: "keyPoints",          heading: "Key Points",          icon: "✅", isList: true  },
+    { key: "summary",            heading: "Summary",             icon: "📋", isList: false },
+  ],
+  chart: [
+    { key: "chartType",          heading: "Chart Type",          icon: "📈", isList: false },
+    { key: "dataHighlights",     heading: "Data Highlights",     icon: "🔑", isList: true  },
+    { key: "trend",              heading: "Trend / Insight",     icon: "💡", isList: false },
+    { key: "summary",            heading: "Summary",             icon: "📋", isList: false },
+  ],
+  photo: [
+    { key: "subjects",           heading: "Subjects",            icon: "👁️", isList: true  },
+    { key: "setting",            heading: "Setting / Context",   icon: "🌍", isList: false },
+    { key: "details",            heading: "Notable Details",     icon: "🔍", isList: false },
+    { key: "summary",            heading: "Summary",             icon: "📋", isList: false },
+  ],
+};
+
+// ── Step 1 prompt: classify ───────────────────────────────────────────────────
+const CLASSIFY_PROMPT = `You are an image classification agent. Examine this image and classify it.
+
+Return ONLY a valid JSON object with exactly this structure:
+{
+  "type": "whiteboard" | "diagram" | "screenshot" | "document" | "chart" | "photo",
+  "label": "Human-readable label, e.g. 'System Architecture Diagram'",
+  "icon": "Single emoji representing this type",
+  "reasoning": "One sentence explaining why you chose this type",
+  "confidence": 0.0 to 1.0
 }
 
-async function callOpenRouter(
+Rules:
+- type MUST be one of: whiteboard, diagram, screenshot, document, chart, photo
+- Return ONLY valid JSON, no markdown, no preamble`;
+
+// ── Step 2 prompt: adaptive analysis ─────────────────────────────────────────
+function buildAnalysisPrompt(type: ClassificationType): string {
+  const fields = TYPE_FIELDS[type];
+  const fieldDocs = fields
+    .map((f) => {
+      const valueDesc = f.isList
+        ? `array of strings (list items)`
+        : `string`;
+      return `  "${f.key}": ${valueDesc}  // ${f.heading}`;
+    })
+    .join(",\n");
+
+  return `You are an expert image analyst. This image has been classified as: ${type}.
+
+Analyze it and return ONLY a valid JSON object with exactly this structure:
+{
+${fieldDocs}
+}
+
+Rules:
+- Be thorough and specific to what you see in this image
+- For list fields, provide 3-6 meaningful items as an array of strings
+- For string fields, write clear, professional prose (2-5 sentences)
+- Return ONLY valid JSON, no markdown, no preamble, no extra keys`;
+}
+
+// ── Gemini API call ───────────────────────────────────────────────────────────
+async function callGemini(
   apiKey: string,
-  siteUrl: string,
-  siteName: string,
-  systemPrompt: string,
-  userContent: unknown[],
-  maxTokens = 2000,
-  temperature = 0.2
+  base64: string,
+  mimeType: string,
+  textPrompt: string
 ): Promise<string> {
-  const response = await fetch(OPENROUTER_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-      "HTTP-Referer": siteUrl,
-      "X-Title": siteName,
+  const payload = {
+    model: "gemma-4-26b-a4b-it",
+    contents: [
+      {
+        role: "user",
+        parts: [
+          {
+            inline_data: { mime_type: mimeType, data: base64 },
+          },
+          { text: textPrompt },
+        ],
+      },
+    ],
+    generationConfig: {
+      temperature: 0.2,
+      maxOutputTokens: 3000,
+      responseMimeType: "application/json",
     },
-    body: JSON.stringify({
-      model: MODEL,
-      temperature,
-      max_tokens: maxTokens,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userContent },
-      ],
-    }),
-  });
+  };
 
-  if (!response.ok) {
-    const errData = await response.json().catch(() => ({}));
-    const statusMessages: Record<number, string> = {
-      401: "Invalid API key. Check your OPENROUTER_API_KEY.",
-      402: "OpenRouter credit is depleted. Please top up your account.",
-      429: "Rate limit reached. Please try again shortly.",
-    };
-    throw new Error(
-      statusMessages[response.status] ||
-      errData?.error?.message ||
-      `OpenRouter error ${response.status}`
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemma-4-26b-a4b-it:generateContent?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }
+  );
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err?.error?.message || `Gemini API error ${res.status}`);
+  }
+
+  const data = await res.json();
+  const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!raw) throw new Error("Empty response from model.");
+  return raw.replace(/```json|```/g, "").trim();
+}
+
+// ── Route handler ─────────────────────────────────────────────────────────────
+export async function POST(req: NextRequest) {
+  // Validate file
+  const form = await req.formData();
+  const file = form.get("file") as File | null;
+  if (!file) {
+    return NextResponse.json({ error: "No image file provided." }, { status: 400 });
+  }
+  if (file.size > 10 * 1024 * 1024) {
+    return NextResponse.json({ error: "File terlalu besar. Maksimal 10MB." }, { status: 400 });
+  }
+  const allowed = ["image/jpeg", "image/png", "image/webp"];
+  if (!allowed.includes(file.type)) {
+    return NextResponse.json(
+      { error: "Format tidak didukung. Gunakan JPG, PNG, atau WEBP." },
+      { status: 400 }
     );
   }
 
-  const data = await response.json();
-  return data?.choices?.[0]?.message?.content || "";
-}
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return NextResponse.json({ error: "API key tidak ditemukan." }, { status: 500 });
+  }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  // Convert to base64 once
+  const arrayBuffer = await file.arrayBuffer();
+  const base64 = Buffer.from(arrayBuffer).toString("base64");
+  const mimeType = file.type;
 
-// ── Main POST Handler ────────────────────────────────────────────────────────
-export async function POST(req: NextRequest) {
-  const encoder = new TextEncoder();
-
-  const stream = new ReadableStream<Uint8Array>({
+  // Build SSE stream
+  const stream = new ReadableStream({
     async start(controller) {
-      const emit = (event: string, data: unknown) =>
-        encodeEvent(controller, encoder, event, data);
-
       try {
-        // 1. Parse form
-        const form = await req.formData();
-        const file = form.get("file") as File | null;
+        // ── Status: reading ───────────────────────────────────────────────
+        sseEvent(controller, "status", { step: "reading", label: "Reading image…" });
 
-        if (!file) {
-          emit("error", { message: "No image file provided." });
-          controller.close();
-          return;
-        }
+        // ── Status: classifying ───────────────────────────────────────────
+        sseEvent(controller, "status", { step: "classifying", label: "Agent classifying image type…" });
+        sseEvent(controller, "tool_call", {
+          tool: "classify_image",
+          label: "Classify Image",
+          status: "running",
+        });
 
-        if (file.size > 4.5 * 1024 * 1024) {
-          emit("error", { message: "File too large. Maximum 4.5MB." });
-          controller.close();
-          return;
-        }
+        const classifyRaw = await callGemini(apiKey, base64, mimeType, CLASSIFY_PROMPT);
+        const classification: ClassificationResult = JSON.parse(classifyRaw);
 
-        if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
-          emit("error", { message: "Unsupported format. Use JPG, PNG, or WEBP." });
-          controller.close();
-          return;
-        }
-
-        const apiKey = process.env.OPENROUTER_API_KEY;
-        if (!apiKey) {
-          emit("error", { message: "OPENROUTER_API_KEY not found." });
-          controller.close();
-          return;
-        }
-
-        const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://localhost:3000";
-        const siteName = process.env.NEXT_PUBLIC_SITE_NAME || "Conversa AI — Image Agent";
-
-        // 2. Convert to base64
-        emit("status", { step: "reading", label: "Reading image…" });
-        const arrayBuffer = await file.arrayBuffer();
-        const base64 = Buffer.from(arrayBuffer).toString("base64");
-        const dataUrl = `data:${file.type};base64,${base64}`;
-
-        // ── TOOL 1: classify_image ──────────────────────────────────────────
-        emit("status", { step: "classifying", label: "Agent classifying image type…" });
-        emit("tool_call", { tool: "classify_image", label: "Classify Image" });
-
-        const classifyRaw = await callOpenRouter(
-          apiKey, siteUrl, siteName,
-          "You are an image classification agent. Respond ONLY with valid JSON, no markdown.",
-          [
-            { type: "image_url", image_url: { url: dataUrl } },
-            {
-              type: "text",
-              text: `Classify this image into exactly ONE of these types:
-- "whiteboard" — whiteboard, blackboard, flipchart with handwritten content
-- "diagram" — flowchart, architecture diagram, UML, ERD, mind map, network diagram
-- "screenshot" — screenshot of software, website, app, or digital interface
-- "document" — photo of a physical or digital document, form, report, invoice, letter
-- "chart" — bar chart, line graph, pie chart, data visualization, infographic
-- "photo" — real-world photo, scene, object, person (anything not in the above categories)
-
-Return ONLY this JSON:
-{
-  "type": "<one of the types above>",
-  "confidence": <0.0 to 1.0>,
-  "reasoning": "<1 sentence why you chose this type>",
-  "dominant_colors": ["<color1>", "<color2>"],
-  "has_text": <true|false>,
-  "has_diagrams": <true|false>
-}`,
-            },
-          ],
-          500, 0.1
-        );
-
-        const classifyParsed = extractJSON(classifyRaw);
-        const imageType = (classifyParsed?.type as string) || "photo";
-        const validTypes = Object.keys(IMAGE_TYPE_CONFIGS);
-        const resolvedType = validTypes.includes(imageType) ? imageType : "photo";
-        const typeConfig = IMAGE_TYPE_CONFIGS[resolvedType];
-
-        emit("tool_result", {
+        sseEvent(controller, "tool_result", {
           tool: "classify_image",
           result: {
-            type: resolvedType,
-            label: typeConfig.label,
-            confidence: classifyParsed?.confidence,
-            reasoning: classifyParsed?.reasoning,
-            has_text: classifyParsed?.has_text,
-            has_diagrams: classifyParsed?.has_diagrams,
+            label: classification.label,
+            confidence: classification.confidence,
           },
         });
 
-        emit("classification", {
-          type: resolvedType,
-          label: typeConfig.label,
-          icon: typeConfig.icon,
-          reasoning: classifyParsed?.reasoning || "",
+        sseEvent(controller, "classification", {
+          type:      classification.type,
+          label:     classification.label,
+          icon:      classification.icon,
+          reasoning: classification.reasoning,
         });
 
-        await sleep(150);
+        // ── Status: analyzing ─────────────────────────────────────────────
+        sseEvent(controller, "status", { step: "analyzing", label: "Adaptive analysis running…" });
+        sseEvent(controller, "tool_call", {
+          tool: "analyze_adaptive",
+          label: `Adaptive Analysis · ${classification.label}`,
+          status: "running",
+        });
 
-        // ── TOOL 2: analyze_adaptive ────────────────────────────────────────
-        emit("status", { step: "analyzing", label: `Analyzing as ${typeConfig.label}…` });
-        emit("tool_call", { tool: "analyze_adaptive", label: "Adaptive Analysis", imageType: resolvedType });
+        const analysisPrompt = buildAnalysisPrompt(classification.type);
+        const analysisRaw = await callGemini(apiKey, base64, mimeType, analysisPrompt);
+        const analysisData: Record<string, string | string[]> = JSON.parse(analysisRaw);
 
-        // Build adaptive prompt based on image type
-        const fieldInstructions = typeConfig.fields
-          .map((f, i) => `${i + 1}. "${f.key}": ${f.instruction}${f.isList ? " Return as JSON array of strings." : ""}`)
-          .join("\n");
+        const fieldDefs = TYPE_FIELDS[classification.type] ?? [];
+        let fieldsPopulated = 0;
 
-        const outputShape = typeConfig.fields.reduce((acc, f) => {
-          acc[f.key] = f.isList ? ["item 1", "item 2"] : "content here";
-          return acc;
-        }, {} as Record<string, unknown>);
+        for (const def of fieldDefs) {
+          const value = analysisData[def.key];
+          if (value === undefined || value === null) continue;
 
-        const analyzeRaw = await callOpenRouter(
-          apiKey, siteUrl, siteName,
-          "You are an expert image analyst. Respond ONLY with valid JSON, no markdown, no backticks.",
-          [
-            { type: "image_url", image_url: { url: dataUrl } },
-            {
-              type: "text",
-              text: `This image has been classified as: ${typeConfig.label}
+          const field: FieldResult = {
+            key:     def.key,
+            heading: def.heading,
+            icon:    def.icon,
+            isList:  def.isList,
+            value:   value,
+          };
 
-Perform a thorough analysis and populate ALL fields below:
-
-${fieldInstructions}
-
-Return ONLY this JSON structure:
-${JSON.stringify(outputShape, null, 2)}
-
-Rules:
-- Be specific and detailed — no generic filler
-- Base everything strictly on what's actually visible in the image
-- For list fields, provide at least 3 items`,
-            },
-          ],
-          3000, 0.25
-        );
-
-        const analyzeParsed = extractJSON(analyzeRaw);
-
-        if (!analyzeParsed) {
-          emit("error", { message: "Agent could not analyze the image. Please try again." });
-          controller.close();
-          return;
+          sseEvent(controller, "field", field as unknown as Record<string, unknown>);
+          fieldsPopulated++;
         }
 
-        emit("tool_result", {
+        sseEvent(controller, "tool_result", {
           tool: "analyze_adaptive",
           result: {
-            fields_populated: typeConfig.fields.filter(f => analyzeParsed[f.key]).length,
-            total_fields: typeConfig.fields.length,
+            fields_populated: fieldsPopulated,
+            total_fields:     fieldDefs.length,
           },
         });
 
-        await sleep(100);
-
-        // Stream fields progressively
-        for (const field of typeConfig.fields) {
-          const value = analyzeParsed[field.key];
-          if (!value) continue;
-
-          emit("field", {
-            key: field.key,
-            heading: field.heading,
-            icon: field.icon,
-            isList: field.isList || false,
-            value: Array.isArray(value) ? value : String(value),
-          });
-
-          await sleep(90);
-        }
-
-        emit("done", {
-          imageType: resolvedType,
-          imageTypeLabel: typeConfig.label,
-          fieldsCount: typeConfig.fields.length,
-        });
-
-        controller.close();
-      } catch (err) {
-        console.error("Image Agent error:", err);
-        encodeEvent(controller, encoder, "error", {
-          message: err instanceof Error ? err.message : "Internal server error.",
-        });
+        // ── Done ──────────────────────────────────────────────────────────
+        sseEvent(controller, "status", { step: "done", label: "Complete." });
+        sseEvent(controller, "done", {});
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : "Internal server error.";
+        sseEvent(controller, "error", { message });
+      } finally {
         controller.close();
       }
     },
@@ -351,9 +282,9 @@ Rules:
 
   return new Response(stream, {
     headers: {
-      "Content-Type": "text/event-stream",
+      "Content-Type":  "text/event-stream",
       "Cache-Control": "no-cache",
-      Connection: "keep-alive",
+      Connection:      "keep-alive",
     },
   });
 }
