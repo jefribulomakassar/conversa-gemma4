@@ -88,19 +88,23 @@ function extractJSON(raw: string): Record<string, unknown> | null {
   }
 }
 
+// FIX: removed "transcript" from the JSON output — transcript is already
+// streamed separately. Including it caused the model to exhaust tokens
+// rewriting the full transcript before reaching keyPoints/actionItems/followUpQuestions.
 function buildPrompt(transcript: string): string {
-  return `Analyze this meeting transcript and return ONLY a JSON object.
-Start with { and end with }. No markdown, no explanation.
+  return `You are a meeting analyst. Analyze the transcript below and return ONLY a JSON object.
+Start with { and end with }. No markdown, no explanation, no extra text.
 
 Transcript:
+"""
 ${transcript}
+"""
 
-JSON structure required:
+Required JSON structure (do NOT include the transcript text itself):
 {
-  "transcript": "full transcript verbatim",
-  "keyPoints": ["3-6 key discussion points"],
-  "actionItems": ["concrete tasks with owner if mentioned"],
-  "followUpQuestions": ["2-4 follow-up questions"]
+  "keyPoints": ["3–6 concise key discussion points extracted from the transcript"],
+  "actionItems": ["concrete tasks or action items, include owner name if mentioned"],
+  "followUpQuestions": ["2–4 relevant follow-up questions based on the discussion"]
 }`;
 }
 
@@ -166,7 +170,7 @@ async function callGoogleAI(
   return { raw: fallbackRaw, usedModel: FALLBACK_MODEL, isFallback: true };
 }
 
-// ── Helper: tulis satu event SSE ke encoder ──────────────────────────────────
+// ── SSE helper ────────────────────────────────────────────────────────────────
 function encodeEvent(
   controller: ReadableStreamDefaultController<Uint8Array>,
   encoder: TextEncoder,
@@ -205,7 +209,7 @@ export async function POST(req: NextRequest) {
 
         const mimeType = file.type || "audio/mpeg";
         if (!ALLOWED_AUDIO_TYPES.includes(mimeType)) {
-          emit("error", { message: `Unsupported formats: ${mimeType}.` });
+          emit("error", { message: `Unsupported format: ${mimeType}.` });
           controller.close();
           return;
         }
@@ -224,7 +228,7 @@ export async function POST(req: NextRequest) {
           return;
         }
 
-        // 2. Transkripsi via Groq Whisper
+        // 2. Transcribe via Groq Whisper
         emit("status", { step: "transcribing" });
 
         const whisperForm = new FormData();
@@ -249,32 +253,33 @@ export async function POST(req: NextRequest) {
         const transcript: string = whisperData?.text?.trim() ?? "";
 
         if (!transcript) {
-          emit("error", { message: "Transcription is empty. Make sure the audio contains conversation." });
+          emit("error", { message: "Transcription is empty. Make sure the audio contains speech." });
           controller.close();
           return;
         }
 
-        // Stream transcript segera setelah selesai
+        // Stream transcript immediately after transcription
         emit("transcript", { text: transcript });
 
-        // 3. Analisis via Google AI
+        // 3. Analyze via Google AI
         emit("status", { step: "analyzing" });
 
         const prompt = buildPrompt(transcript);
         const { raw, usedModel, isFallback } = await callGoogleAI(prompt, googleKey);
 
-        // 4. Parse JSON
+        // 4. Parse JSON response
+        emit("status", { step: "parsing" });
         const parsed = extractJSON(raw);
-
-        const keyPoints: string[] = Array.isArray(parsed?.keyPoints) ? parsed.keyPoints as string[] : [];
-        const actionItems: string[] = Array.isArray(parsed?.actionItems) ? parsed.actionItems as string[] : [];
-        const followUpQuestions: string[] = Array.isArray(parsed?.followUpQuestions) ? parsed.followUpQuestions as string[] : [];
 
         if (!parsed) {
           console.error(`JSON extraction failed (${usedModel}). Raw:`, raw.slice(0, 500));
         }
 
-        // 5. Stream setiap section dengan jeda kecil agar efek streaming terasa di UI
+        const keyPoints: string[] = Array.isArray(parsed?.keyPoints) ? parsed.keyPoints as string[] : [];
+        const actionItems: string[] = Array.isArray(parsed?.actionItems) ? parsed.actionItems as string[] : [];
+        const followUpQuestions: string[] = Array.isArray(parsed?.followUpQuestions) ? parsed.followUpQuestions as string[] : [];
+
+        // 5. Stream each section with a small delay for UI effect
         emit("keyPoints", { items: keyPoints });
         await sleep(120);
 
@@ -289,7 +294,7 @@ export async function POST(req: NextRequest) {
           _meta: {
             model: usedModel,
             isFallback,
-            warning: !parsed ? "Invalid JSON from model." : undefined,
+            warning: !parsed ? "Model returned invalid JSON." : undefined,
           },
         });
 
