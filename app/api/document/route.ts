@@ -305,6 +305,7 @@ Rules:
 
         // ── Done ────────────────────────────────────────────────────────────
         send("done", {});
+        await new Promise(r => setTimeout(r, 50));
         controller.close();
       } catch (err) {
         console.error("Document route stream error:", err);
